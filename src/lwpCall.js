@@ -24,6 +24,19 @@ export default class {
     if (session) {
       this._timeUpdate();
     }
+
+    if (this._shouldAutoAnswer()) {
+      this.answer();
+    }
+  }
+
+  _shouldAutoAnswer() {
+    if (this._session == null) return false;
+    if (this._session._request == null) return false;
+    if (!this._session._request.headers["Call-Info"]) return false;
+    
+    return this._session._request.headers["Call-Info"]
+      && this._session._request.headers["Call-Info"][0].raw.includes("answer-after=0");
   }
 
   getId() {
@@ -515,7 +528,7 @@ export default class {
       });
     });
 
-    if (this.isRinging()) {
+    if (this.isRinging() && !this._shouldAutoAnswer()) {
       this._emit("ringing.started", this);
     }
   }
