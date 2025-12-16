@@ -350,7 +350,6 @@ export default class extends lwpRenderer {
       audioinput: {
         enabled: true,
         show: true,
-        constraints: {},
         preferedDeviceIds: [],
         mediaElement: {
           create: false,
@@ -534,11 +533,28 @@ export default class extends lwpRenderer {
         this._sortAvailableDevices();
 
         Object.keys(this._availableDevices).forEach((deviceKind) => {
-          const selectedDevice = this._availableDevices[deviceKind].find(
-            (availableDevice) => {
-              return availableDevice.selected;
+          var selectedDevice = false;
+          if (!selectedDevice && this._config[deviceKind].preferedDeviceIds.length > 0) {
+            const preferredDevice = this._availableDevices[deviceKind].find(
+              (availableDevice) => {
+                return availableDevice.id == this._config[deviceKind].preferedDeviceIds[0];
+              });
+            if (preferredDevice) {
+              preferredDevice.selected = true;
+              selectedDevice = true;
             }
-          );
+            else {
+              selectedDevice = false;
+            }
+          }
+
+          if (!selectedDevice) {
+            selectedDevice = this._availableDevices[deviceKind].find(
+              (availableDevice) => {
+                return availableDevice.selected;
+              }
+            );
+          }
 
           if (!selectedDevice) {
             const availableDevice = this._availableDevices[deviceKind][0];
