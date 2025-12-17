@@ -439,7 +439,7 @@ export default class extends lwpRenderer {
           ).forEach((parameterName) => {
             this._config[deviceKind].mediaElement.element[parameterName] =
               this._config[deviceKind].mediaElement.initParameters[
-                parameterName
+              parameterName
               ];
           });
         }
@@ -469,13 +469,13 @@ export default class extends lwpRenderer {
       // Add screenCapture device if screenCapture is enabled in config
       ...(this._config.videoinput.screenCapture
         ? [
-            this._deviceParameters({
-              deviceId: "screenCapture",
-              label: "libwebphone:mediaDevices.screenCapture",
-              kind: "videoinput",
-              displayOrder: 1,
-            }),
-          ]
+          this._deviceParameters({
+            deviceId: "screenCapture",
+            label: "libwebphone:mediaDevices.screenCapture",
+            kind: "videoinput",
+            displayOrder: 1,
+          }),
+        ]
         : []),
     ];
   }
@@ -537,8 +537,11 @@ export default class extends lwpRenderer {
           if (!selectedDevice && this._config[deviceKind].preferedDeviceIds.length > 0) {
             const preferredDevice = this._availableDevices[deviceKind].find(
               (availableDevice) => {
-                return availableDevice.id == this._config[deviceKind].preferedDeviceIds[0];
+                return this._config[deviceKind].preferedDeviceIds.some((preferedDeviceId) => {
+                  return availableDevice.id == preferedDeviceId;
+                });
               });
+
             if (preferredDevice) {
               preferredDevice.selected = true;
               selectedDevice = true;
@@ -1073,7 +1076,7 @@ export default class extends lwpRenderer {
         if (this._config.manageMediaElements && element && element.paused) {
           // TODO: without the interaction history of my dev site, can we still
           //  issue a play this early?
-          element.play().catch(() => {});
+          element.play().catch(() => { });
         }
       } else {
         if (this._config.manageMediaElements && element && !element.paused) {
