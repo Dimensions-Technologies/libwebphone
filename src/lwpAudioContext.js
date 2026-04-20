@@ -22,16 +22,19 @@ export default class extends lwpRenderer {
   }
 
   startAudioContext() {
-    if (!this._started) {
+    if (this._audioContext.state === "suspended") {
       this._audioContext.resume();
-      this._ringerAudio.carrierNode.start();
-      this._ringerAudio.modulatorNode.start();
-      this._previewAudio.oscillatorNode.start();
-
-      this._started = true;
-
-      this._emit("started", this);
     }
+
+    if (!this._started) {
+       this._ringerAudio.carrierNode.start();
+       this._ringerAudio.modulatorNode.start();
+       this._previewAudio.oscillatorNode.start();
+
+       this._started = true;
+
+       this._emit("started", this);
+     }
   }
 
   startPreviewTone() {
@@ -212,6 +215,8 @@ export default class extends lwpRenderer {
     }
 
     if (!this._ringerAudio.ringerConnected) {
+      this._ringerAudio.ringerGain.gain.cancelScheduledValues(0);
+      this._ringerAudio.ringerGain.gain.value = 0.00001;
       this._ringerAudio.ringerConnected = true;
       this._ringerAudio.ringerGain.connect(this._getOutputGainNode("ringer"));
     }
@@ -238,14 +243,16 @@ export default class extends lwpRenderer {
   }
 
   stopAllRinging() {
-    if (this._ringerAudio.ringerConnected) {
-      this._ringerAudio.ringerConnected = false;
-      this._ringerAudio.ringerGain.disconnect();
-    }
-
     this._ringerAudio.calls = [];
-
     this._ringerMute();
+
+    const rampDuration = this._config.channels.ringer.onTime * 0.2;
+    setTimeout(() => {
+      if (this._ringerAudio.ringerConnected) {
+        this._ringerAudio.ringerConnected = false;
+        this._ringerAudio.ringerGain.disconnect();
+      }
+    }, (rampDuration + 0.05) * 1000); // small extra buffer
   }
 
   getDestinationStream() {
@@ -286,7 +293,7 @@ export default class extends lwpRenderer {
           volume: 1.0,
         },
         ringer: {
-          onTime: 1.5,
+          onTime: 2.0,
           offTime: 1.0,
           carrier: {
             frequency: 440,
@@ -736,11 +743,14 @@ export default class extends lwpRenderer {
   }
 
   _ringerMute() {
-    const timestamp =
-      this._ringerAudio.context.currentTime +
-      this._config.channels.ringer.onTime * 0.2;
+    const rampDuration = this._config.channels.ringer.onTime * 0.2;
+    const timestamp = this._ringerAudio.context.currentTime + rampDuration;
 
     this._ringerAudio.ringerGain.gain.cancelScheduledValues(0);
+    this._ringerAudio.ringerGain.gain.setValueAtTime(
+      this._ringerAudio.ringerGain.gain.value,
+      this._ringerAudio.context.currentTime
+    );
     this._ringerAudio.ringerGain.gain.exponentialRampToValueAtTime(
       0.00001,
       timestamp
@@ -748,11 +758,14 @@ export default class extends lwpRenderer {
   }
 
   _ringerUnmute() {
-    const timestamp =
-      this._ringerAudio.context.currentTime +
-      this._config.channels.ringer.offTime * 0.2;
+    const rampDuration = this._config.channels.ringer.offTime * 0.2;
+    const timestamp = this._ringerAudio.context.currentTime + rampDuration;
 
     this._ringerAudio.ringerGain.gain.cancelScheduledValues(0);
+    this._ringerAudio.ringerGain.gain.setValueAtTime(
+      this._ringerAudio.ringerGain.gain.value,
+      this._ringerAudio.context.currentTime
+    );
     this._ringerAudio.ringerGain.gain.exponentialRampToValueAtTime(
       0.5,
       timestamp
