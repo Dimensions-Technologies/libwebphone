@@ -14,6 +14,24 @@ export default class {
     this._initProperties();
     this._initEventBindings();
 
+    // Accept codecPreferences from config or session data
+    this._codecPreferences = (session && session.data && session.data.codecPreferences)
+      || (this._libwebphone._config && this._libwebphone._config.codecPreferences)
+      || { audio: [], video: [] };
+
+    // Attach SDP munging handler if session is present
+    if (session && typeof session.on === 'function') {
+      session.on('sdp', (e) => {
+        if (e.originator !== 'local') return;
+        const prefs = this._codecPreferences || {};
+        ['audio', 'video'].forEach(kind => {
+          if (Array.isArray(prefs[kind]) && prefs[kind].length) {
+            e.sdp = filterCodecsInSDP(e.sdp, kind, prefs[kind]);
+          }
+        });
+      });
+    }
+
     const callList = this._libwebphone.getCallList();
     if (!callList) {
       this._setPrimary();
@@ -24,19 +42,55 @@ export default class {
     if (session) {
       this._timeUpdate();
     }
-
-    if (this._shouldAutoAnswer()) {
-      this.answer();
-    }
-  }
-
-  _shouldAutoAnswer() {
-    if (this._session == null) return false;
-    if (this._session._request == null) return false;
-    if (!this._session._request.headers["Call-Info"]) return false;
-    
-    return this._session._request.headers["Call-Info"]
-      && this._session._request.headers["Call-Info"][0].raw.includes("answer-after=0");
+	
+  function filterCodecsInSDP(sdp, kind, allowed) {
+    // allowed: array of codec names or full keys, e.g. ['opus/48000/2']
+    // kind: 'audio' or 'video'
+    // Returns munged SDP string
+    const wantFull = allowed.map(s => String(s).toLowerCase());
+    const wantName = allowed.map(s => String(s).split('/')[0].toLowerCase());
+    // Find m-line
+    const mLineRegex = new RegExp('(m=' + kind + ' \\d+ [A-Z/]+ )([0-9 ]+)\\r?\\n([\\s\\S]*?)(?=\\r?\\nm=|$)', 'i');
+      return sdp.replace(mLineRegex, (whole, pre, pts, body) => {
+		// Map PT -> codec name/full
+		const ptToName = {}, ptToFull = {};
+		body.replace(/a=rtpmap:(\d+)\s+([A-Za-z0-9\-]+)\/(\d+)(?:\/(\d+))?/g,
+          (_, pt, name, rate, ch) => {
+			const full = (name + '/' + rate + (ch ? ('/' + ch) : '')).toLowerCase();
+			ptToName[pt] = name.toLowerCase();
+			ptToFull[pt] = full;
+          });
+		const list = pts.trim().split(/\s+/);
+		// Ancillaries always kept at end
+		function isAnc(pt) {
+          const n = ptToName[pt] || '';
+          return /^(telephone-event|cn|rtx|red|ulpfec)$/i.test(n);
+		}
+		// Keep ONLY preferred payloads (by full key or by name), plus ancillaries
+		const keptPreferred = [], keptAnc = [];
+		for (let i = 0; i < list.length; i++) {
+          const pt = list[i];
+          const full = ptToFull[pt];
+          const name = ptToName[pt];
+          if (isAnc(pt)) { keptAnc.push(pt); continue; }
+          if (!full && !name) continue;
+          if (wantFull.indexOf(full) !== -1 || wantName.indexOf(name) !== -1) {
+			keptPreferred.push(pt);
+          }
+		}
+		if (!keptPreferred.length) return whole; // fallback: keep original
+		const newPts = keptPreferred.concat(keptAnc);
+		// Filter attribute lines to only the kept PTs
+		const keep = {};
+		for (let k = 0; k < newPts.length; k++) keep[newPts[k]] = true;
+          const filteredBody = body.split(/\r?\n/).filter(line => {
+          const m = line.match(/^a=(rtpmap|fmtp|rtcp-fb|extmap):(\d+)/);
+          if (!m) return true;
+          return !!keep[m[2]];
+		}).join("\r\n");
+		return pre + newPts.join(' ') + "\r\n" + filteredBody;
+      });
+	}
   }
 
   getId() {
@@ -528,7 +582,7 @@ export default class {
       });
     });
 
-    if (this.isRinging() && !this._shouldAutoAnswer()) {
+    if (this.isRinging()) {
       this._emit("ringing.started", this);
     }
   }
