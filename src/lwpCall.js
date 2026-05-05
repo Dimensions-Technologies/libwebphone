@@ -276,8 +276,34 @@ export default class {
   unhold() {
     if (this.hasSession()) {
       this._getSession().unhold();
-      this._updateStreams();
     }
+  }
+
+  _setAudioSenderActive(active) {
+    // Stops/resumes outbound RTP encoding without renegotiating SDP.
+    // Without this, JsSIP's hold only changes SDP direction; the encoder keeps
+    // running and the platform's jitter buffer accumulates audio for the
+    // duration of the hold, producing a persistent delay on unhold.
+    const peerConnection = this.getPeerConnection();
+    if (!peerConnection) return;
+
+    peerConnection.getSenders().forEach((sender) => {
+      if (!sender.track || sender.track.kind !== "audio") return;
+      try {
+        const params = sender.getParameters();
+        if (!params.encodings || !params.encodings.length) {
+          params.encodings = [{}];
+        }
+        params.encodings.forEach((enc) => {
+          enc.active = active;
+        });
+        sender.setParameters(params).catch((e) => {
+          this._emit("error", this, e);
+        });
+      } catch (e) {
+        this._emit("error", this, e);
+      }
+    });
   }
 
   /**
@@ -678,11 +704,18 @@ export default class {
       this._getSession().on("newInfo", (...event) => {
         this._emit("receive.info", this, ...event);
       });
-      this._getSession().on("hold", (...event) => {
-        this._emit("hold", this, ...event);
+      this._getSession().on("hold", (event) => {
+        this._emit("hold", this, event);
+        if (event.originator === "local") {
+          this._setAudioSenderActive(false);
+        }
       });
-      this._getSession().on("unhold", (...event) => {
-        this._emit("unhold", this, ...event);
+      this._getSession().on("unhold", (event) => {
+        this._emit("unhold", this, event);
+        if (event.originator === "local") {
+          this._updateStreams();
+          this._setAudioSenderActive(true);
+        }
       });
       this._getSession().on("muted", (...event) => {
         this._emit("muted", this, ...event);
