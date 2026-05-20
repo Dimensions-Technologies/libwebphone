@@ -224,6 +224,21 @@ export default class {
     }
   }
 
+  remoteIdentityOverride(details = false) {
+    if (!this._remoteIdentityOverride) {
+      return null;
+    }
+    if (details) {
+      return this._remoteIdentityOverride;
+    }
+    const { display_name, uri_user } = this._remoteIdentityOverride;
+    if (display_name && display_name != uri_user) {
+      return display_name + " (" + uri_user + ")";
+    } else {
+      return uri_user;
+    }
+  }
+
   remoteURIUser() { 
     const session = this._getSession();
     if (session) {
@@ -526,6 +541,7 @@ export default class {
       originating: direction == "originating",
       localIdentity: this.localIdentity(),
       remoteIdentity: this.remoteIdentity(),
+      remoteIdentityOverride: this.remoteIdentityOverride(),
     };
   }
 
@@ -564,6 +580,8 @@ export default class {
     this._primary = false;
 
     this._inTransfer = false;
+
+    this._remoteIdentityOverride = null;
 
     this._muteHint = false;
 
@@ -715,6 +733,26 @@ export default class {
         if (event.originator === "local") {
           this._updateStreams();
           this._setAudioSenderActive(true);
+        }
+      });
+      this._getSession().on("update", (event) => {
+        console.log("[lwpCall:update] SIP UPDATE received", event.request);
+        const paiHeaders = event.request && event.request.headers["P-Asserted-Identity"];
+        const rawPai = paiHeaders && paiHeaders[0] && paiHeaders[0].raw;
+        console.log("[lwpCall:update] P-Asserted-Identity raw value:", rawPai);
+        if (rawPai) {
+          const match = rawPai.match(/^"?([^"<]*?)"?\s*<sip:([^@>]+)@/i);
+          if (match) {
+            const display_name = match[1].trim() || null;
+            const uri_user = match[2];
+            console.log("[lwpCall:update] P-Asserted-Identity parsed", { display_name, uri_user });
+            this._remoteIdentityOverride = { display_name, uri_user };
+            this._emit("remoteIdentity.updated", this);
+          } else {
+            console.log("[lwpCall:update] P-Asserted-Identity could not be parsed:", rawPai);
+          }
+        } else {
+          console.log("[lwpCall:update] SIP UPDATE has no P-Asserted-Identity header");
         }
       });
       this._getSession().on("muted", (...event) => {
