@@ -231,12 +231,8 @@ export default class {
     if (details) {
       return this._remoteIdentityOverride;
     }
-    const { display_name, uri_user } = this._remoteIdentityOverride;
-    if (display_name && display_name != uri_user) {
-      return display_name + " (" + uri_user + ")";
-    } else {
-      return uri_user;
-    }
+
+    return this._remoteIdentityOverride.uri_user;
   }
 
   remoteURIUser() { 
