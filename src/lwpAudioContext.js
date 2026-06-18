@@ -391,9 +391,6 @@ export default class extends lwpRenderer {
       this._outputAudio.context
     );
     this._outputAudio.tonesGain.gain.value = this._config.channels.tones.volume;
-    if (this._config.channels.tones.connectToMaster) {
-      this._outputAudio.tonesGain.connect(this._outputAudio.masterGain);
-    }
 
     this._outputAudio.remoteGain = this._shimCreateGain(
       this._outputAudio.context
@@ -416,14 +413,36 @@ export default class extends lwpRenderer {
       this._outputAudio.previewGain.connect(this._outputAudio.masterGain);
     }
 
+    // Ringer, preview, remote → masterGain → ringoutput element (original routing)
     this._outputAudio.destinationStream =
       this._shimCreateMediaStreamDestination(this._outputAudio.context);
     this._outputAudio.masterGain.connect(this._outputAudio.destinationStream);
 
-    if (mediaDevices && mediaDevices.getMediaElement("ringoutput")) {
-      const element = mediaDevices.getMediaElement("ringoutput");
-      element.srcObject = this._outputAudio.destinationStream.stream;
-      this._outputAudio.usingAudioElement = true;
+    // Tones get their own stream to the audiooutput element (speaker), like call audio
+    this._outputAudio.tonesDestinationStream =
+      this._shimCreateMediaStreamDestination(this._outputAudio.context);
+    this._outputAudio.tonesGain.connect(
+      this._outputAudio.tonesDestinationStream
+    );
+
+    if (mediaDevices) {
+      const ringerElement = mediaDevices.getMediaElement("ringoutput");
+      if (ringerElement) {
+        ringerElement.srcObject = this._outputAudio.destinationStream.stream;
+        this._outputAudio.usingAudioElement = true;
+      } else {
+        this._outputAudio.masterGain.connect(
+          this._outputAudio.context.destination
+        );
+        this._outputAudio.usingAudioElement = false;
+      }
+
+      const speakerElement = mediaDevices.getMediaElement("audiooutput");
+      if (speakerElement) {
+        speakerElement.srcObject =
+          this._outputAudio.tonesDestinationStream.stream;
+        speakerElement.volume = this._config.channels.master.volume;
+      }
     } else {
       this._outputAudio.masterGain.connect(
         this._outputAudio.context.destination
@@ -569,7 +588,14 @@ export default class extends lwpRenderer {
       });
     }
 
-    this._libwebphone.on("audioContext.channel.master.volume", () => {
+    this._libwebphone.on("audioContext.channel.master.volume", (lwp, audioContext, volume) => {
+      const mediaDevices = this._libwebphone.getMediaDevices();
+      if (mediaDevices) {
+        const speakerElement = mediaDevices.getMediaElement("audiooutput");
+        if (speakerElement) {
+          speakerElement.volume = volume;
+        }
+      }
       this.updateRenders();
     });
     this._libwebphone.on("audioContext.channel.ringer.volume", () => {
