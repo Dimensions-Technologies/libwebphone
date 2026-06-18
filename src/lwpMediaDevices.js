@@ -204,6 +204,7 @@ export default class extends lwpRenderer {
       .then(async (devices) => {
         const release = await this._changeStreamMutex.acquire();
         const alteredTrackKinds = [];
+        const alteredOutputDevices = [];
 
         // NOTE: assume all devices are disconnected then transition
         //  each back to connected if enumerated
@@ -214,6 +215,7 @@ export default class extends lwpRenderer {
         });
 
         this._importInputDevices(devices);
+        this._sortAvailableDevices();
 
         Object.keys(this._availableDevices).forEach((deviceKind) => {
           const selectedDevice = this._availableDevices[deviceKind].find(
@@ -239,6 +241,9 @@ export default class extends lwpRenderer {
 
             if (preferedDevice) {
               preferedDevice.selected = true;
+              if (deviceKind === "audiooutput" || deviceKind === "ringoutput") {
+                alteredOutputDevices.push({ deviceKind, device: preferedDevice });
+              }
             }
           }
         });
@@ -281,7 +286,33 @@ export default class extends lwpRenderer {
 
           release();
 
-          return this._startInputStreams(alteredConstraints);
+          return this._startInputStreams(alteredConstraints).then(() => {
+            return this._mediaStreamPromise;
+          }).then((mediaStream) => {
+            ["audio", "video"].forEach((trackKind) => {
+              if (alteredConstraints[trackKind]) {
+                const newTrack = mediaStream.getTracks().find(
+                  (t) => t.kind === trackKind && t.readyState === "live"
+                );
+                if (newTrack) {
+                  this._emit(
+                    trackKind + ".input.changed",
+                    this,
+                    lwpUtils.trackParameters(mediaStream, newTrack),
+                    null
+                  );
+                }
+              }
+            });
+
+            alteredOutputDevices.forEach(({ deviceKind, device }) => {
+              if (deviceKind === "ringoutput") {
+                this._changeRingOutputDevice(device);
+              } else {
+                this._changeOutputDevice(device);
+              }
+            });
+          });
         });
       })
       .then(() => {
