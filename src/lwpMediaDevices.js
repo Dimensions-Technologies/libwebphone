@@ -21,11 +21,50 @@ export default class extends lwpRenderer {
     return this;
   }
 
+  // Best-effort diagnostic snapshot of device/track state, logged before
+  // every answer attempt. Deliberately fire-and-forget and fully isolated
+  // in its own try/catch - a failure or slowness here must never delay or
+  // break the actual call flow. Not awaited by the caller on purpose.
+  _logMediaSnapshot(context) {
+    try {
+      const devices = {};
+      Object.keys(this._availableDevices || {}).forEach((kind) => {
+        devices[kind] = (this._availableDevices[kind] || []).map((d) => ({
+          id: d.id,
+          label: d.label,
+          selected: d.selected,
+          connected: d.connected,
+        }));
+      });
+      console.debug("[lwpMediaDevices] device snapshot (" + context + ")", devices);
+
+      Promise.resolve(this._mediaStreamPromise)
+        .then((mediaStream) => {
+          const tracks = mediaStream
+            ? mediaStream.getTracks().map((track) => ({
+                kind: track.kind,
+                label: track.label,
+                readyState: track.readyState,
+                enabled: track.enabled,
+                muted: track.muted,
+              }))
+            : null;
+          console.debug("[lwpMediaDevices] current stream snapshot (" + context + ")", tracks);
+        })
+        .catch((error) => {
+          console.debug("[lwpMediaDevices] current stream snapshot (" + context + ") - promise rejected", error);
+        });
+    } catch (error) {
+      console.warn("[lwpMediaDevices] _logMediaSnapshot failed (non-fatal, does not affect the call)", error);
+    }
+  }
+
   startStreams(requestId = null) {
+    this._logMediaSnapshot("startStreams");
     this._startMediaElements();
 
     if (this._inputActive) {
-      return this._mediaStreamPromise.then((mediaStream) => {
+      return this._ensureMediaStream().then((mediaStream) => {
         return this._createCallStream(mediaStream, requestId);
       });
     }
@@ -76,6 +115,13 @@ export default class extends lwpRenderer {
     this._startedStreams = [];
 
     return this._mediaStreamPromise.then((mediaStream) => {
+      // Nothing to stop/clean up if we never had a real stream - do not
+      // attempt recovery here, that would acquire media just to immediately
+      // tear it down again.
+      if (!mediaStream) {
+        return;
+      }
+
       mediaStream.getTracks().forEach((track) => {
         this._removeTrack(mediaStream, track, false);
       });
@@ -547,6 +593,7 @@ export default class extends lwpRenderer {
             return mediaStream;
           });
         }
+        return new MediaStream();
       });
 
     return this._mediaStreamPromise;
@@ -955,7 +1002,8 @@ export default class extends lwpRenderer {
   }
 
   _changeInputDevice(preferedDevice) {
-    return this._mediaStreamPromise.then((mediaStream) => {
+    return this._ensureMediaStream().then((mediaStream) => {
+
       let mutedInputs = [];
 
       const trackKind = preferedDevice.trackKind;
@@ -1037,12 +1085,51 @@ export default class extends lwpRenderer {
     });
   }
 
+  // _mediaStreamPromise is set exactly once, in _initInputStreams(), and is
+  // never reassigned afterwards even if a later recovery attempt succeeds -
+  // every reader (mute, device switching, subsequent calls) shares this one
+  // field. If it ever resolves without a usable MediaStream, every consumer
+  // must recover through here so the recovered stream is written back to
+  // _mediaStreamPromise itself, not just handed to the one caller that
+  // happened to trigger the recovery. Returning a fabricated empty
+  // MediaStream without persisting a real recovery back to the shared
+  // promise is what causes mute/device-switching to silently stop working
+  // for the rest of the session - do not reintroduce that.
+  _ensureMediaStream(constraints = null) {
+    return this._mediaStreamPromise.then((mediaStream) => {
+      if (mediaStream) {
+        return mediaStream;
+      }
+
+      console.warn("[lwpMediaDevices] _mediaStreamPromise resolved without a usable MediaStream; attempting recovery");
+      this._emit("mediaStreamPromise.recovering", this);
+
+      return this._shimGetUserMedia(constraints || this._createConstraints())
+        .then((recoveredMediaStream) => {
+          this._updateMediaElements(recoveredMediaStream);
+          // Persist the recovery so every other reader of _mediaStreamPromise
+          // (not just this call) sees the real stream from now on.
+          this._mediaStreamPromise = Promise.resolve(recoveredMediaStream);
+          this._emit("mediaStreamPromise.recovered", this);
+          return recoveredMediaStream;
+        })
+        .catch((error) => {
+          this._emit("getUserMedia.error", this, error);
+          console.warn("[lwpMediaDevices] recovery attempt also failed; no usable media is available", error);
+          // Deliberately do NOT persist an empty MediaStream into
+          // _mediaStreamPromise - leave it broken so the next attempt tries
+          // again, rather than permanently caching a dead stream.
+          return new MediaStream();
+        });
+    });
+  }
+
   _startInputStreams(constraints = null) {
     if (!constraints) {
       constraints = this._createConstraints();
     }
 
-    return this._mediaStreamPromise.then((mediaStream) => {
+    return this._ensureMediaStream(constraints).then((mediaStream) => {
       mediaStream.getTracks().forEach((track) => {
         if (track.readyState == "live") {
           delete constraints[track.kind];
@@ -1084,6 +1171,7 @@ export default class extends lwpRenderer {
                 return mediaStream;
               });
           }
+          return mediaStream;
         });
     });
   }
@@ -1259,6 +1347,12 @@ export default class extends lwpRenderer {
   }
 
   _createCallStream(mediaStream, requestId) {
+    if (!mediaStream) {
+      console.warn("[lwpMediaDevices] _createCallStream: received an undefined mediaStream; recovering with an empty one");
+      this._emit("mediaStreamPromise.recovered", this, { location: "_createCallStream" });
+      mediaStream = new MediaStream();
+    }
+
     const newMediaStream = new MediaStream();
 
     /**

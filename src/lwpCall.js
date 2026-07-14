@@ -389,11 +389,32 @@ export default class {
 
       if (mediaDevices) {
         mediaDevices.startStreams(this.getId()).then((streams) => {
-          const options = {
-            mediaStream: streams,
-          };
+          const hasTracks = streams && streams.getTracks().length > 0;
 
-          this._getSession().answer(options);
+          if (!hasTracks) {
+            // Our own media pipeline, including its own recovery attempt in
+            // _ensureMediaStream(), could not produce any usable media. Do
+            // not answer with an empty stream - JsSIP would treat it as real
+            // and silently connect with no audio in either direction. Do not
+            // omit it and let JsSIP's own independent getUserMedia() take
+            // over either - if that succeeded, the resulting stream would
+            // live outside our own tracking (_startedStreams /
+            // _mediaStreamPromise), silently breaking mute and device
+            // switching for the rest of the call. Reject the call cleanly
+            // instead - this sends a proper SIP rejection to the caller and
+            // fires our normal "failed" event chain.
+            // The SIP-level termination cause below will report as
+            // "Rejected" (JsSIP hardcodes that for terminating a
+            // not-yet-answered session), not the more specific
+            // "User Denied Media Access" - log that explicitly here so the
+            // real reason is traceable/searchable even though the SIP cause
+            // itself is generic.
+            console.warn("[lwpCall] answer(): no usable media available (cause: User Denied Media Access) for call " + this.getId() + "; rejecting the call (SIP termination cause will report as: Rejected)");
+            this._getSession().terminate({ status_code: 480, reason_phrase: "No Media Available" });
+            return;
+          }
+
+          this._getSession().answer({ mediaStream: streams });
           this._emit("answered", this);
         });
       } else {
