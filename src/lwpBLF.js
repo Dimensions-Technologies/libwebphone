@@ -446,27 +446,27 @@ export default class extends lwpRenderer {
     }
 
     _renderData(data = {}) {
-        return lwpUtils.merge(data, {
-            keys: this._keys.map((key) => ({
-                id: key.id,
-                name: key.name,
-                status: key.status,
-                isIdle: key.status === "idle",
-                isRinging: key.status === "ringing",
-                isInCall: key.status === "incall",
-                isUnknown: key.status === "unknown",
-                callInfo: key.callInfo
-                    ? {
-                        direction: key.callInfo.direction,
-                        dialogState: key.callInfo.dialogState,
-                        localDisplay: key.callInfo.localDisplay,
-                        localIdentity: key.callInfo.localIdentity,
-                        remoteDisplay: key.callInfo.remoteDisplay,
-                        remoteIdentity: key.callInfo.remoteIdentity,
-                    }
-                    : null,
-            })),
-        });
+        data.keys = this._keys.map((key) => ({
+            id: key.id,
+            name: key.name,
+            status: key.status,
+            isIdle: key.status === "idle",
+            isRinging: key.status === "ringing",
+            isInCall: key.status === "incall",
+            isUnknown: key.status === "unknown",
+            callInfo: key.callInfo
+                ? {
+                    direction: key.callInfo.direction,
+                    dialogState: key.callInfo.dialogState,
+                    localDisplay: key.callInfo.localDisplay,
+                    localIdentity: key.callInfo.localIdentity,
+                    remoteDisplay: key.callInfo.remoteDisplay,
+                    remoteIdentity: key.callInfo.remoteIdentity,
+                }
+                : null,
+        }));
+
+        return data;
     }
 
     _renderDefaultTemplate() {

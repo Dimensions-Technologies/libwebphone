@@ -234,11 +234,6 @@
             resize: vertical;
         }
 
-        label {
-            width: 180px;
-            vertical-align: top;
-        }
-
         body {
             background: #fff;
             color: #000;
@@ -248,83 +243,451 @@
             cursor: pointer;
         }
 
-        .blf-keys {
+        /* ===================================================================
+           Design tokens
+           =================================================================== */
+        * {
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg: #f2f4f7;
+            --panel: #ffffff;
+            --panel-alt: #f7f8fa;
+            --border: #dde2e8;
+            --text: #1a1d21;
+            --text-dim: #636b74;
+            --text-faint: #98a1a9;
+            --accent: #007bff;
+            --accent-soft: #eaf2ff;
+            --accent-contrast: #ffffff;
+            --success: #1a9e5c;
+            --success-hover: #178a50;
+            --danger: #e0393e;
+            --danger-hover: #c92e33;
+            --warn: #b8860b;
+            --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+            --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+            --radius: 8px;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #14161a;
+                --panel: #1c1f24;
+                --panel-alt: #20232a;
+                --border: #2c3038;
+                --text: #e7eaed;
+                --text-dim: #9aa1a9;
+                --text-faint: #666d75;
+                --accent: #4d9dff;
+                --accent-soft: #172940;
+                --accent-contrast: #0b0d10;
+                --success: #3ecf82;
+                --success-hover: #34b873;
+                --danger: #ff6b6b;
+                --danger-hover: #ff8484;
+                --warn: #ffc94d;
+            }
+        }
+
+        html {
+            font-family: var(--sans);
+        }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: var(--sans);
+            font-size: 14px;
+        }
+
+        /* ===================================================================
+           Page shell
+           =================================================================== */
+        .page {
+            max-width: 1440px;
+            margin: 0 auto;
+            padding: 28px 24px 72px;
+            display: flex;
+            flex-direction: column;
+            gap: 18px;
+        }
+
+        .masthead {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 6px;
+            padding-bottom: 6px;
+        }
+
+        .masthead h1 {
+            font-size: 19px;
+            font-weight: 700;
+            letter-spacing: -0.01em;
+            color: var(--text);
+        }
+
+        .masthead p {
+            color: var(--text-faint);
+            font-size: 12.5px;
+        }
+
+        /* ===================================================================
+           Panels
+           =================================================================== */
+        .panel {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
+        }
+
+        .panel-header {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 10px;
+            padding: 9px 16px;
+            border-bottom: 1px solid var(--border);
+            background: var(--panel-alt);
+            font-size: 11.5px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-dim);
+        }
+
+        .panel-header-meta {
+            text-transform: none;
+            letter-spacing: normal;
+            font-weight: 600;
+            font-family: var(--mono);
+            font-size: 11px;
+            color: var(--text-faint);
+        }
+
+        .panel-columns {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        }
+
+        .panel-columns--single {
+            grid-template-columns: 1fr;
+        }
+
+        /* ===================================================================
+           Tabs - used where showing every render-target variant
+           side-by-side wastes space (a hidden variant in a CSS Grid row
+           still gets stretched to match its tallest sibling's height, even
+           collapsed). Only one .tab-panel is ever visible, so each panel's
+           height is just its own content, not the tallest alternate.
+           =================================================================== */
+        .tabs {
             display: flex;
             flex-wrap: wrap;
-            gap: 8px;
-            padding: 4px 0;
+            gap: 2px;
+            padding: 0 16px;
+            background: var(--panel-alt);
+            border-bottom: 1px solid var(--border);
         }
 
-        .blf-key {
+        .tabs .tab-btn {
+            appearance: none;
+            background: transparent;
+            border: none;
+            border-bottom: 2px solid transparent;
+            color: var(--text-faint);
+            font-family: inherit;
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            padding: 9px 10px 7px;
+            cursor: pointer;
+        }
+
+        .tabs .tab-btn:hover {
+            color: var(--text-dim);
+        }
+
+        .tabs .tab-btn.active {
+            color: var(--accent);
+            border-bottom-color: var(--accent);
+        }
+
+        .tab-panels .tab-panel {
+            display: none;
+        }
+
+        .tab-panels .tab-panel.active {
+            display: block;
+        }
+
+        .tab-panels .tab-panel.panel-column.active {
+            display: flex;
+        }
+
+        .panel-column {
+            padding: 16px;
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            min-width: 0;
+        }
+
+        .panel-column:last-child {
+            border-right: none;
+        }
+
+        .panel-column-label {
+            font-size: 10.5px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--text-faint);
+        }
+
+        summary.panel-column-label {
+            cursor: pointer;
+            user-select: none;
+        }
+
+        summary.panel-column-label::marker {
+            color: var(--text-faint);
+        }
+
+        details.panel-column[open] summary.panel-column-label {
+            margin-bottom: 2px;
+        }
+
+        /* ===================================================================
+           Form controls (covers every default/custom libwebphone template -
+           they all render bare label+control rows with no classes of their
+           own, so these rules key off tag shape rather than markup we don't
+           control). :has() lets one rule reach every component's rows
+           regardless of nesting depth.
+           =================================================================== */
+        .panel-column div:has(> label) {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 6px 10px;
+            min-width: 0;
+            margin-bottom: 8px;
+        }
+
+        .panel-column div:has(> label):last-child {
+            margin-bottom: 0;
+        }
+
+        .panel-column div:has(> button):not(:has(> label)) {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .panel-column fieldset div {
             display: flex;
             align-items: center;
-            gap: 8px;
-            padding: 8px 12px;
-            border-radius: 4px;
-            border: 2px solid #ccc;
-            min-width: 140px;
-            font-size: 14px;
-            transition: background-color 0.3s, border-color 0.3s;
+            gap: 6px;
+            padding: 2px 0;
+            font-size: 12.5px;
         }
 
-            .blf-key .blf-indicator {
-                width: 14px;
-                height: 14px;
-                border-radius: 50%;
-                flex-shrink: 0;
-                background-color: #ccc;
-            }
+        .panel-column label {
+            width: 150px;
+            flex-shrink: 0;
+            font-size: 12.5px;
+            font-weight: 600;
+            color: var(--text-dim);
+        }
 
-            .blf-key.blf-idle {
-                border-color: #28a745;
-            }
+        .panel-column fieldset {
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 10px 12px;
+        }
 
-                .blf-key.blf-idle .blf-indicator {
-                    background-color: #28a745;
-                }
+        .panel-column legend {
+            display: block;
+            font-size: 10.5px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-faint);
+            margin-bottom: 6px;
+        }
 
-            .blf-key.blf-ringing {
-                border-color: #ffc107;
-            }
+        .panel-column button {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: var(--panel);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 6px 12px;
+            font-family: inherit;
+            font-size: 12.5px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color .15s, border-color .15s, color .15s;
+        }
 
-                .blf-key.blf-ringing .blf-indicator {
-                    background-color: #ffc107;
-                    animation: blf-pulse 0.8s infinite;
-                }
+        .panel-column button:hover:not(:disabled) {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
 
-            .blf-key.blf-incall {
-                border-color: #dc3545;
-            }
+        .panel-column button:disabled {
+            opacity: .45;
+            cursor: default;
+        }
 
-                .blf-key.blf-incall .blf-indicator {
-                    background-color: #dc3545;
-                }
+        .panel-column button:active:not(:disabled) {
+            transform: translateY(1px);
+        }
 
-            .blf-key.blf-unknown {
-                border-color: #6c757d;
-            }
+        .panel-column button.btn-primary {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: var(--accent-contrast);
+        }
 
-                .blf-key.blf-unknown .blf-indicator {
-                    background-color: #6c757d;
-                }
+        .panel-column button.btn-primary:hover:not(:disabled) {
+            filter: brightness(1.08);
+            color: var(--accent-contrast);
+            border-color: var(--accent);
+        }
 
-            .blf-key .blf-name {
-                font-weight: 600;
-            }
+        .panel-column button.btn-danger {
+            background: var(--danger);
+            border-color: var(--danger);
+            color: #fff;
+        }
 
-            .blf-key .blf-status {
-                color: #555;
-                font-size: 12px;
-            }
+        .panel-column button.btn-danger:hover:not(:disabled) {
+            filter: brightness(1.08);
+            color: #fff;
+            border-color: var(--danger);
+        }
 
-        @keyframes blf-pulse {
-            0%, 100% {
-                opacity: 1;
-            }
+        .panel-column select,
+        .panel-column input[type="text"],
+        .panel-column input[type="number"],
+        .panel-column input[type="password"] {
+            background: var(--panel);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 5px 8px;
+            font-family: inherit;
+            font-size: 12.5px;
+            max-width: 100%;
+        }
 
-            50% {
-                opacity: 0.3;
-            }
+        .panel-column select {
+            flex: 1;
+            min-width: 200px;
+        }
+
+        #user_agent input[type="text"] {
+            width: 260px;
+        }
+
+        .panel-column select:focus,
+        .panel-column input:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-soft);
+        }
+
+        .panel-column button:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 1px;
+        }
+
+        .panel-column input[type="range"] {
+            flex: 1;
+            accent-color: var(--accent);
+            min-width: 80px;
+        }
+
+        .panel-column input[type="radio"] {
+            accent-color: var(--accent);
+        }
+
+        .status-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            padding: 5px 11px;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            background: var(--panel-alt);
+            font-size: 12.5px;
+            font-weight: 600;
+            color: var(--text-dim);
+            width: fit-content;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            flex-shrink: 0;
+            background: var(--text-faint);
+        }
+
+        .status-pill--danger {
+            border-color: var(--danger);
+            color: var(--danger);
+        }
+
+        .status-pill--danger .status-dot {
+            background: var(--danger);
+        }
+
+        .status-pill--warn {
+            border-color: var(--warn);
+            color: var(--warn);
+        }
+
+        .status-pill--warn .status-dot {
+            background: var(--warn);
+        }
+
+        .status-pill--ok {
+            border-color: var(--success);
+            color: var(--success);
+        }
+
+        .status-pill--ok .status-dot {
+            background: var(--success);
+        }
+
+        .blf-adhoc-form {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            max-width: 260px;
+        }
+
+        .blf-adhoc-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        #video_screen {
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: #000;
+            max-width: 100%;
         }
 
         .col {
@@ -381,16 +744,16 @@
                     }
 
                 .dialpad .dials .digits:active {
-                    background: #00caf2;
+                    background: var(--accent);
                     border-top-color: #b2f2ff;
                 }
 
         .compact .dials .digits p {
-            padding: 25px 15px;
+            padding: 10px 12px;
         }
 
             .compact .dials .digits p strong {
-                font-size: 30px;
+                font-size: 18px;
             }
 
             .compact .dials .digits p sup {
@@ -399,12 +762,31 @@
             }
 
         .compact .dials .pad-action {
-            background: #093;
+            background: var(--success);
         }
 
             .compact .dials .pad-action:active {
-                background: #0c3;
+                background: var(--success-hover);
             }
+
+
+        #dialpad_themed_input input[type="text"] {
+            width: 100%;
+            background: #1d1918;
+            color: #fff;
+            border: 1px solid #4d4d4d;
+            border-radius: 4px;
+            padding: 10px 12px;
+            font-family: var(--mono);
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        #dialpad_themed_input input[type="text"]:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
 
         .spinner {
             margin: 100px auto 0;
@@ -453,107 +835,260 @@
                 transform: scale(1);
             }
         }
+
+        /* BLF - custom render (index.html's own renderBLFCustom()) */
+        .blf-keys {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            padding: 4px 0;
+        }
+
+        .blf-key {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            background: var(--panel);
+            border-radius: 4px;
+            border: 2px solid #ccc;
+            min-width: 140px;
+            font-size: 14px;
+            transition: background-color 0.3s, border-color 0.3s;
+        }
+
+            .blf-key .blf-indicator {
+                width: 14px;
+                height: 14px;
+                border-radius: 50%;
+                flex-shrink: 0;
+                background-color: #ccc;
+            }
+
+            .blf-key.blf-idle {
+                border-color: #28a745;
+            }
+
+                .blf-key.blf-idle .blf-indicator {
+                    background-color: #28a745;
+                }
+
+            .blf-key.blf-ringing {
+                border-color: #ffc107;
+            }
+
+                .blf-key.blf-ringing .blf-indicator {
+                    background-color: #ffc107;
+                    animation: blf-pulse 0.8s infinite;
+                }
+
+            .blf-key.blf-incall {
+                border-color: #dc3545;
+            }
+
+                .blf-key.blf-incall .blf-indicator {
+                    background-color: #dc3545;
+                }
+
+            .blf-key.blf-unknown {
+                border-color: #6c757d;
+            }
+
+                .blf-key.blf-unknown .blf-indicator {
+                    background-color: #6c757d;
+                }
+
+            .blf-key .blf-name {
+                font-weight: 600;
+            }
+
+            .blf-key .blf-status {
+                color: var(--text-dim);
+                font-size: 12px;
+            }
+
+        @keyframes blf-pulse {
+            0%, 100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.3;
+            }
+        }
+
+        /* Call List */
+        #call_list .lwp-call-row {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            max-width: 720px;
+            border: 1px solid var(--border);
+            border-radius: 5px;
+            background: var(--panel-alt);
+            padding: 8px 10px;
+            margin-bottom: 6px;
+        }
+
+        #call_list .lwp-call-row--placeholder {
+            border-style: dashed;
+            background: var(--panel);
+        }
+
+        #call_list .lwp-call-row--active {
+            border-color: var(--accent);
+            background: var(--accent-soft);
+        }
+
+        #call_list .lwp-call-radio {
+            margin-top: 3px;
+            flex-shrink: 0;
+        }
+
+        #call_list .lwp-call-label {
+            width: auto;
+            flex: 1;
+            min-width: 0;
+            cursor: pointer;
+        }
+
+        #call_list .lwp-call-label--new {
+            color: var(--text-faint);
+            font-style: italic;
+        }
+
+        #call_list .lwp-call-title {
+            font-size: 13px;
+            font-weight: 700;
+            color: var(--text);
+            margin-bottom: 4px;
+        }
+
+        #call_list .lwp-call-ids {
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+            margin-bottom: 8px;
+        }
+
+        #call_list .lwp-call-ids .lwp-call-field {
+            justify-content: flex-start;
+            border-bottom: none;
+            padding: 0;
+        }
+
+        #call_list .lwp-call-grid {
+            max-width: 400px;
+            columns: 2 190px;
+            column-gap: 16px;
+        }
+
+        #call_list .lwp-call-field {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            gap: 8px;
+            padding: 3px 0;
+            border-bottom: 1px solid var(--border);
+            break-inside: avoid;
+        }
+
+        #call_list .lwp-call-key {
+            color: var(--text-dim);
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.01em;
+            white-space: nowrap;
+        }
+
+        #call_list .lwp-call-value {
+            color: var(--text);
+            font-family: var(--mono);
+            font-size: 11.5px;
+            text-align: right;
+        }
+
+        #call_list .lwp-call-value--id {
+            white-space: nowrap;
+        }
+
+        #call_list .lwp-call-value--on {
+            color: var(--accent);
+            font-weight: 700;
+        }
     </style>
 
     <script src="dist/libwebphone.js" type="text/javascript"></script>
 
     <script type="text/javascript">
-        var config = {
-            dialpad: {
-                renderTargets: [
-                    "dialpad",
-                    {
-                        root: { elementId: "dialpad_custom_tweaked" },
-                        data: {
-                            dialed: {
-                                show: true,
-                                filter: { show: false },
-                                convert: { show: false },
-                            },
-                            dialpad: { show: false },
-                            controls: { show: true },
-                        },
-                    },
-                ],
-            },
-            callList: {
-                renderTargets: ["call_list"],
-            },
-            callControl: {
-                renderTargets: ["call_control"],
-            },
-            mediaDevices: {
-                audioinput: {
-                    preferedDeviceIds: ["bnkZoip5H5kiNXBLV+YNGalX9r0kvfNjJsZcOkHPeQQ="],
+        // Config (including SIP credentials) lives in config.json, which is
+        // gitignored - copy config.example.json to config.json and fill in
+        // your own details. Loaded synchronously so every script below,
+        // which all assume `config`/`webphone` already exist, keeps working
+        // unchanged.
+        var config = (function () {
+            var xhr = new XMLHttpRequest();
+            xhr.open("GET", "config.json", false);
+            xhr.send(null);
+
+            if (xhr.status !== 200) {
+                throw new Error(
+                    "Failed to load config.json (HTTP " + xhr.status + "). " +
+                    "Copy config.example.json to config.json and fill in your SIP details."
+                );
+            }
+
+            return JSON.parse(xhr.responseText);
+        })(); //End ofConfig
+
+        // The call list's card template is presentation code coupled to
+        // this file's own CSS (.lwp-call-row, .lwp-call-chip, etc. in the
+        // <style> block above) - not environment config, so it lives here
+        // rather than in config.json. Kept out of the gitignored file so
+        // everyone gets the same UI automatically instead of needing to
+        // copy template changes into their own local config by hand.
+        config.callList = {
+            renderTargets: [
+                {
+                    root: { elementId: "call_list" },
+                    template: `
+                          {{#data.calls}}
+                          {{^hasSession}}
+                          <div class="lwp-call-row lwp-call-row--placeholder{{#primary}} lwp-call-row--active{{/primary}}">
+                            <input type="radio" id="{{by_name.calls.elementName}}{{callId}}" name="{{by_name.calls.elementName}}" value="{{callId}}" class="lwp-call-radio" {{#primary}}checked="checked"{{/primary}}>
+                            <label for="{{by_name.calls.elementName}}{{callId}}" class="lwp-call-label lwp-call-label--new">{{i18n.new}}</label>
+                          </div>
+                          {{/hasSession}}
+
+                          {{#hasSession}}
+                          <div class="lwp-call-row{{#primary}} lwp-call-row--active{{/primary}}">
+                            <input type="radio" id="{{by_name.calls.elementName}}{{callId}}" name="{{by_name.calls.elementName}}" value="{{callId}}" class="lwp-call-radio" {{#primary}}checked="checked"{{/primary}}>
+                            <label for="{{by_name.calls.elementName}}{{callId}}" class="lwp-call-label">
+                              <div class="lwp-call-title">{{remoteIdentity}}</div>
+                              <div class="lwp-call-ids">
+                                <div class="lwp-call-field"><span class="lwp-call-key">id</span><span class="lwp-call-value lwp-call-value--id">{{callId}}</span></div>
+                                <div class="lwp-call-field"><span class="lwp-call-key">conf id</span><span class="lwp-call-value lwp-call-value--id">{{conferenceId}}</span></div>
+                              </div>
+                              <div class="lwp-call-grid">
+                                <div class="lwp-call-field"><span class="lwp-call-key">primary</span><span class="lwp-call-value">{{primary}}</span></div>
+                                <div class="lwp-call-field"><span class="lwp-call-key">progress</span><span class="lwp-call-value">{{progress}}</span></div>
+                                <div class="lwp-call-field"><span class="lwp-call-key">established</span><span class="lwp-call-value">{{established}}</span></div>
+                                <div class="lwp-call-field"><span class="lwp-call-key">held</span><span class="lwp-call-value{{#held}} lwp-call-value--on{{/held}}">{{held}}</span></div>
+                                <div class="lwp-call-field"><span class="lwp-call-key">in conference</span><span class="lwp-call-value{{#inConference}} lwp-call-value--on{{/inConference}}">{{inConference}}</span></div>
+                                <div class="lwp-call-field"><span class="lwp-call-key">audio muted</span><span class="lwp-call-value{{#isAudioMuted}} lwp-call-value--on{{/isAudioMuted}}">{{isAudioMuted}}</span></div>
+                                <div class="lwp-call-field"><span class="lwp-call-key">caller muted</span><span class="lwp-call-value{{#callerMuted}} lwp-call-value--on{{/callerMuted}}">{{callerMuted}}</span></div>
+                                <div class="lwp-call-field"><span class="lwp-call-key">in transfer</span><span class="lwp-call-value{{#inTransfer}} lwp-call-value--on{{/inTransfer}}">{{inTransfer}}</span></div>
+                                <div class="lwp-call-field"><span class="lwp-call-key">ended</span><span class="lwp-call-value">{{ended}}</span></div>
+                                <div class="lwp-call-field"><span class="lwp-call-key">direction</span><span class="lwp-call-value">{{direction}}</span></div>
+                              </div>
+                            </label>
+                          </div>
+                          {{/hasSession}}
+                          {{/data.calls}}
+                        `,
                 },
-                videoinput: {
-                    enabled: true,
-                },
-                renderTargets: [
-                    "media_device",
-                    {
-                        root: {
-                            elementId: "media_device_tweaked",
-                        },
-                        data: {
-                            ringoutput: { show: false },
-                            audiooutput: { show: false },
-                            audioinput: { show: false },
-                        },
-                    },
-                ],
-            },
-            audioContext: {
-                renderTargets: [
-                    "audio_context",
-                    {
-                        root: { elementId: "audio_context_tweaked" },
-                        data: {
-                            input: { local: { show: false } },
-                            output: { preview: { show: false } },
-                        },
-                    },
-                ],
-            },
-            codecPreferences: {
-                audio: [],
-                video: []
-            },            
-            userAgent: {
-                renderTargets: ["user_agent"],
-                transport: {
-                    sockets: ["wss://svr001-zone1.ucaas.cloud:5065"],
-                    recovery_max_interval: 30,
-                    recovery_min_interval: 2,
-                },
-                authentication: {
-                    username: "",
-                    password: "",
-                    realm: "",
-                },
-                user_agent: {
-                    //contact_uri: '',
-                    //display_name: '',
-                    instance_id: "8f1fa16a-1165-4a96-8341-785b1ef24f12",
-                    no_answer_timeout: 60,
-                    register: true,
-                    register_expires: 300,
-                    user_agent: "libwebphone 2.x - dev",
-                },
-            },
-            videoCanvas: {
-                canvas: "video_screen",
-                renderTargets: ["video_controls"],
-            },
-            blf: {
-                enabled: true,
-                renderTargets: ["blf_default"],
-                keys: [],
-                subscribe_expires: 3600,
-                resubscribe_delay: 1000,
-                notify_timeout: 60000,
-            },
-        }; //End ofConfig
+            ],
+        };
 
         var webphone = new libwebphone(config);
         webphone.on("userAgent.recieved.notify", (lwp, userAgent, data) => {
@@ -617,409 +1152,470 @@
 </head>
 <body>
     <div id="test"></div>
-    <div class="container-fluid">
+    <div class="page">
+        <div class="masthead">
+            <div>
+                <h1>libwebphone</h1>
+                <p>Kazoo WebRTC SIP client &mdash; component test harness</p>
+            </div>
+        </div>
+
         <!-- User Agent-->
-        <div class="row" style="border: solid;">
-            <div class="col" style="border-right: dashed;">
-                <div id="user_agent"></div>
-            </div>
-            <div class="col" style="border-right: dashed;">
-                <div>
-                    <button onclick="webphone.getUserAgent().start('user_q5eNt95vwv', 'cxNMVV2BD47J');">
-                        Start Mahfuzel New Softphone (1009)
-                    </button>
+        <div class="panel">
+            <div class="panel-header">User Agent</div>
+            <div class="panel-columns">
+                <div class="panel-column">
+                    <div class="panel-column-label">Registration</div>
+                    <div id="user_agent"></div>
                 </div>
-                <div>
-                    <button onclick="webphone.getUserAgent().start('user_743dJ3fuNj', '72aBcdBvQnz3');">
-                        Start Multiple WebRTC (1008)
-                    </button>
+                <div class="panel-column">
+                    <div class="panel-column-label">Quick Connect</div>
+                    <div id="quick_connect_buttons"></div>
+                    <script type="text/javascript">
+                        // Accounts (including credentials) come from config.json's
+                        // quickConnect array - nothing hardcoded here, so nothing
+                        // credential-shaped ends up committed in this file.
+                        (config.quickConnect || []).forEach(function (account) {
+                            var button = document.createElement("button");
+                            button.type = "button";
+                            button.textContent = account.label;
+                            button.onclick = function () {
+                                webphone.getUserAgent().start(account.username, account.password);
+                            };
+                            document.getElementById("quick_connect_buttons").appendChild(button);
+                        });
+                    </script>
                 </div>
-            </div>
-            <div class="col">
-                <div id="user_agent_custom"></div>
-                <script type="text/javascript">
-            var template = `
-                    <div>
-                      {{#data.isConnected}}
-                      {{#data.isRegistered}}
-                      &#128512
-                      {{/data.isRegistered}}
-                      {{/data.isConnected}}
+                <div class="panel-column">
+                    <div class="panel-column-label">Status</div>
+                    <div id="user_agent_custom"></div>
+                    <script type="text/javascript">
+                var template = `
+                        <div>
+                          {{^data.isStarted}}
+                            <div class="status-pill">
+                              <span class="status-dot"></span>
+                              <span>Not started</span>
+                            </div>
+                          {{/data.isStarted}}
 
-                      {{#data.isConnected}}
-                      {{^data.isRegistered}}
-                      &#128542
-                      {{/data.isRegistered}}
-                      {{/data.isConnected}}
+                          {{#data.isStarted}}
+                            {{^data.isConnected}}
+                              <div class="status-pill status-pill--danger">
+                                <span class="status-dot"></span>
+                                <span>Disconnected</span>
+                              </div>
+                            {{/data.isConnected}}
 
-                      {{^data.isConnected}}
-                      {{^data.isRegistered}}
-                      &#128561
-                      {{/data.isRegistered}}
-                      {{/data.isConnected}}
-                    </div>`;
-            var customTemplateConfig = {
-              template: template,
-              root: {
-                elementId: "user_agent_custom",
-              },
-            };
+                            {{#data.isConnected}}
+                              {{^data.isRegistered}}
+                                <div class="status-pill status-pill--warn">
+                                  <span class="status-dot"></span>
+                                  <span>Registering&hellip;</span>
+                                </div>
+                              {{/data.isRegistered}}
 
-            if (webphone.getUserAgent()) {
-              webphone.getUserAgent().renderAddTarget(customTemplateConfig);
-            }
-                </script>
+                              {{#data.isRegistered}}
+                                <div class="status-pill status-pill--ok">
+                                  <span class="status-dot"></span>
+                                  <span>Registered</span>
+                                </div>
+                              {{/data.isRegistered}}
+                            {{/data.isConnected}}
+                          {{/data.isStarted}}
+                        </div>`;
+                var customTemplateConfig = {
+                  template: template,
+                  root: {
+                    elementId: "user_agent_custom",
+                  },
+                };
+
+                if (webphone.getUserAgent()) {
+                  webphone.getUserAgent().renderAddTarget(customTemplateConfig);
+                }
+                    </script>
+                </div>
             </div>
         </div>
 
         <!-- Media Devices-->
-        <div class="row" style="border: solid;">
-            <div class="col" style="border-right: dashed;">
-                <div id="media_device"></div>
+        <div class="panel">
+            <div class="panel-header">Media Devices</div>
+            <div class="tabs">
+                <button type="button" class="tab-btn active" data-tab="default">Default</button>
+                <button type="button" class="tab-btn" data-tab="tweaked">Video Only (tweaked)</button>
+                <button type="button" class="tab-btn" data-tab="custom">Custom</button>
             </div>
-            <div class="col" style="border-right: dashed;">
-                <div id="media_device_tweaked"></div>
-            </div>
-            <div class="col">
-                <div id="media_device_custom"></div>
-                <script type="text/javascript">
-            var template = `
-              <div>
-                <legend>{{i18n.legend}}</legend>
-
-                {{#data.loaded}}
+            <div class="tab-panels">
+                <div class="tab-panel panel-column active" data-tab="default">
+                    <div id="media_device"></div>
+                </div>
+                <div class="tab-panel panel-column" data-tab="tweaked">
+                    <div id="media_device_tweaked"></div>
+                </div>
+                <div class="tab-panel panel-column" data-tab="custom">
+                    <div id="media_device_custom"></div>
+                    <script type="text/javascript">
+                var template = `
                   <div>
-                    <label for="ringoutput">
-                      {{i18n.ringoutput}}
-                    </label>
-                    <fieldset id="ringoutput">
-                      {{#data.ringoutput.devices}}
-                        {{#connected}}
-                          <div><input type="radio" value="{{id}}" name="{{by_name.ringoutputselector.elementName}}" {{#selected}}checked{{/selected}}>{{name}}</input></div>
-                        {{/connected}}
-                      {{/data.ringoutput.devices}}
-                    </fieldset>
+                    <legend>{{i18n.legend}}</legend>
+
+                    {{#data.loaded}}
+                      <fieldset id="ringoutput">
+                        <legend>{{i18n.ringoutput}}</legend>
+                        {{#data.ringoutput.devices}}
+                          {{#connected}}
+                            <div><input type="radio" value="{{id}}" name="{{by_name.ringoutputselector.elementName}}" {{#selected}}checked{{/selected}}>{{name}}</input></div>
+                          {{/connected}}
+                        {{/data.ringoutput.devices}}
+                      </fieldset>
+
+                      <fieldset id="audiooutput">
+                        <legend>{{i18n.audiooutput}}</legend>
+                        {{#data.audiooutput.devices}}
+                          {{#connected}}
+                            <div><input type="radio" value="{{id}}" name="{{by_name.audiooutputselector.elementName}}" {{#selected}}checked{{/selected}}>{{name}}</input></div>
+                          {{/connected}}
+                        {{/data.audiooutput.devices}}
+                      </fieldset>
+
+                      <fieldset id="audioinput">
+                        <legend>{{i18n.audioinput}}</legend>
+                        {{#data.preview}}
+                          <span id="{{by_id.audioinputpreview.elementId}}" style="width:100%;max-width:300px;height:10px;background-color:lightgray;display:block;margin-bottom:8px;">
+                            <div style="height:10px; background-color: #00aeef;"></div>
+                          </span>
+                        {{/data.preview}}
+                        {{#data.audioinput.devices}}
+                          {{#connected}}
+                            <div><input type="radio" value="{{id}}" name="{{by_name.audiooinputselector.elementName}}" {{#selected}}checked{{/selected}}>{{name}}</input></div>
+                          {{/connected}}
+                        {{/data.audioinput.devices}}
+                      </fieldset>
+
+                      <fieldset id="videoinput">
+                        <legend>{{i18n.videoinput}}</legend>
+                        {{#data.videoinput.devices}}
+                          {{#connected}}
+                            <div><input type="radio" value="{{id}}" name="{{by_name.videoinputselector.elementName}}" {{#selected}}checked{{/selected}}>{{name}}</input></div>
+                          {{/connected}}
+                        {{/data.videoinput.devices}}
+                      </fieldset>
+                    {{/data.loaded}}
                   </div>
+                  `;
 
-                  <br>
-
-                  <div>
-                    <label for="audiooutput">
-                      {{i18n.audiooutput}}
-                    </label>
-                    <fieldset id="audiooutput">
-                      {{#data.audiooutput.devices}}
-                        {{#connected}}
-                          <div><input type="radio" value="{{id}}" name="{{by_name.audiooutputselector.elementName}}" {{#selected}}checked{{/selected}}>{{name}}</input></div>
-                        {{/connected}}
-                      {{/data.audiooutput.devices}}
-                    </fieldset>
-                  </div>
-
-                  <br>
-
-                  <div>
-                    <label for="audioinput">
-                      {{i18n.audioinput}}
-                    </label>
-                    {{#data.preview}}
-                      <span id="{{by_id.audioinputpreview.elementId}}" style="width:300px;height:10px;background-color:lightgray;display:inline-block;">
-                        <div style="height:10px; background-color: #00aeef;"></div>
-                      </span>
-                    {{/data.preview}}
-                    <fieldset id="audioinput">
-                      {{#data.audioinput.devices}}
-                        {{#connected}}
-                          <div><input type="radio" value="{{id}}" name="{{by_name.audiooinputselector.elementName}}" {{#selected}}checked{{/selected}}>{{name}}</input></div>
-                        {{/connected}}
-                      {{/data.audioinput.devices}}
-                    </fieldset>
-                  </div>
-
-                  <br>
-
-                  <div>
-                    <label for="videoinput">
-                      {{i18n.videoinput}}
-                    </label>
-                    <fieldset id="videoinput">
-                      {{#data.videoinput.devices}}
-                        {{#connected}}
-                          <div><input type="radio" value="{{id}}" name="{{by_name.videoinputselector.elementName}}" {{#selected}}checked{{/selected}}>{{name}}</input></div>
-                        {{/connected}}
-                      {{/data.videoinput.devices}}
-                    </fieldset>
-                  </div>
-                {{/data.loaded}}
-              </div>
-              `;
-
-            var customConfig = {
-              template: template,
-              root: {
-                elementId: "media_device_custom",
-              },
-              by_name: {
-                ringoutputselector: {
-                  events: {
-                    onchange: (event) => {
-                      const element = event.srcElement;
-                      webphone
-                        .getMediaDevices()
-                        .changeDevice("ringoutput", element.value);
+                var customConfig = {
+                  template: template,
+                  root: {
+                    elementId: "media_device_custom",
+                  },
+                  by_name: {
+                    ringoutputselector: {
+                      events: {
+                        onchange: (event) => {
+                          const element = event.srcElement;
+                          webphone
+                            .getMediaDevices()
+                            .changeDevice("ringoutput", element.value);
+                        },
+                      },
+                    },
+                    audiooutputselector: {
+                      events: {
+                        onchange: (event) => {
+                          const element = event.srcElement;
+                          webphone
+                            .getMediaDevices()
+                            .changeDevice("audiooutput", element.value);
+                        },
+                      },
+                    },
+                    audiooinputselector: {
+                      events: {
+                        onchange: (event) => {
+                          const element = event.srcElement;
+                          webphone
+                            .getMediaDevices()
+                            .changeDevice("audioinput", element.value);
+                        },
+                      },
+                    },
+                    videoinputselector: {
+                      events: {
+                        onchange: (event) => {
+                          const element = event.srcElement;
+                          webphone
+                            .getMediaDevices()
+                            .changeDevice("videoinput", element.value);
+                        },
+                      },
                     },
                   },
-                },
-                audiooutputselector: {
-                  events: {
-                    onchange: (event) => {
-                      const element = event.srcElement;
-                      webphone
-                        .getMediaDevices()
-                        .changeDevice("audiooutput", element.value);
-                    },
-                  },
-                },
-                audiooinputselector: {
-                  events: {
-                    onchange: (event) => {
-                      const element = event.srcElement;
-                      webphone
-                        .getMediaDevices()
-                        .changeDevice("audioinput", element.value);
-                    },
-                  },
-                },
-                videoinputselector: {
-                  events: {
-                    onchange: (event) => {
-                      const element = event.srcElement;
-                      webphone
-                        .getMediaDevices()
-                        .changeDevice("videoinput", element.value);
-                    },
-                  },
-                },
-              },
-            };
-            if (webphone.getMediaDevices()) {
-              webphone.getMediaDevices().renderAddTarget(customConfig);
-            }
-                </script>
+                };
+                if (webphone.getMediaDevices()) {
+                  webphone.getMediaDevices().renderAddTarget(customConfig);
+                }
+                    </script>
+                </div>
             </div>
         </div>
 
         <!-- Audio Mixer -->
-        <div class="row" style="border: solid;">
-            <div class="col" style="border-right: dashed;">
-                <div id="audio_context"></div>
+        <div class="panel">
+            <div class="panel-header">Audio Mixer</div>
+            <div class="tabs">
+                <button type="button" class="tab-btn active" data-tab="default">Default</button>
+                <button type="button" class="tab-btn" data-tab="tweaked">Tweaked</button>
+                <button type="button" class="tab-btn" data-tab="custom">Custom</button>
             </div>
-            <div class="col" style="border-right: dashed;">
-                <div id="audio_context_tweaked"></div>
-            </div>
-            <div class="col">
-                <div id="audio_context_custom"></div>
-                <script type="text/javascript">
-            var template = `
-              <div>
-                <label for="{{by_id.mastervolume.elementId}}">
-                  {{i18n.mastervolume}}
-                </label>
-                <input type="number" id="{{by_id.mastervolume.elementId}}" min="{{data.volume.min}}" max="{{data.volume.max}}" value="{{data.volumes.master}}">
-              </div>
-            `;
-            var customConfig = {
-              template: template,
-              root: {
-                elementId: "audio_context_custom",
-              },
-              by_id: {
-                mastervolume: {
-                  events: {
-                    onchange: (event) => {
-                      let element = event.srcElement;
-                      let audioContext = webphone.getAudioContext();
-                      if (audioContext) {
-                        audioContext.changeVolume(
-                          "master",
-                          element.value / audioContext._config.volumeMax
-                        );
-                      }
+            <div class="tab-panels">
+                <div class="tab-panel panel-column active" data-tab="default">
+                    <div id="audio_context"></div>
+                </div>
+                <div class="tab-panel panel-column" data-tab="tweaked">
+                    <div id="audio_context_tweaked"></div>
+                </div>
+                <div class="tab-panel panel-column" data-tab="custom">
+                    <div id="audio_context_custom"></div>
+                    <script type="text/javascript">
+                var template = `
+                  <div>
+                    <label for="{{by_id.mastervolume.elementId}}">
+                      {{i18n.mastervolume}}
+                    </label>
+                    <input type="number" id="{{by_id.mastervolume.elementId}}" min="{{data.volume.min}}" max="{{data.volume.max}}" value="{{data.volumes.master}}">
+                  </div>
+                `;
+                var customConfig = {
+                  template: template,
+                  root: {
+                    elementId: "audio_context_custom",
+                  },
+                  by_id: {
+                    mastervolume: {
+                      events: {
+                        onchange: (event) => {
+                          let element = event.srcElement;
+                          let audioContext = webphone.getAudioContext();
+                          if (audioContext) {
+                            audioContext.changeVolume(
+                              "master",
+                              element.value / audioContext._config.volumeMax
+                            );
+                          }
+                        },
+                      },
                     },
                   },
-                },
-              },
-            };
-            if (webphone.getAudioContext()) {
-              webphone.getAudioContext().renderAddTarget(customConfig);
-            }
-                </script>
+                };
+                if (webphone.getAudioContext()) {
+                  webphone.getAudioContext().renderAddTarget(customConfig);
+                }
+                    </script>
+                </div>
             </div>
         </div>
 
         <!-- Dialpad -->
-        <div class="row" style="border: solid;">
-            <div class="col" style="border-right: dashed;">
-                <div id="dialpad"></div>
+        <div class="panel">
+            <div class="panel-header">Dialpad</div>
+            <div class="tabs">
+                <button type="button" class="tab-btn" data-tab="default">Default</button>
+                <button type="button" class="tab-btn" data-tab="tweaked">Compact (tweaked)</button>
+                <button type="button" class="tab-btn active" data-tab="custom">Themed (custom)</button>
             </div>
-            <div class="col" style="border-right: dashed;">
-                <div id="dialpad_custom_tweaked"></div>
-            </div>
-            <div class="col">
-                <!-- Example dialpad from https://www.jqueryscript.net/other/Creating-A-Responsive-Phone-Dial-Pad-with-jQuery-CSS3-dialpad.html-->
-                <div id="wrapper">
-                    <div class="dialpad compact"
-                         onkeypress="function(event) { if (event.keyCode == 13) { webphone.getDialpad().autoAction(); } }">
-                        <div class="dials">
-                            <ol>
-                                <li class="digits" onclick="webphone.getDialpad().dial(1);">
-                                    <p><strong>1</strong></p>
-                                </li>
-                                <li class="digits" onclick="webphone.getDialpad().dial(2);">
-                                    <p><strong>2</strong><sup>abc</sup></p>
-                                </li>
-                                <li class="digits" onclick="webphone.getDialpad().dial(3);">
-                                    <p><strong>3</strong><sup>def</sup></p>
-                                </li>
-                                <li class="digits" onclick="webphone.getDialpad().dial(4);">
-                                    <p><strong>4</strong><sup>ghi</sup></p>
-                                </li>
-                                <li class="digits" onclick="webphone.getDialpad().dial(5);">
-                                    <p><strong>5</strong><sup>jkl</sup></p>
-                                </li>
-                                <li class="digits" onclick="webphone.getDialpad().dial(6);">
-                                    <p><strong>6</strong><sup>mno</sup></p>
-                                </li>
-                                <li class="digits" onclick="webphone.getDialpad().dial(7);">
-                                    <p><strong>7</strong><sup>pqrs</sup></p>
-                                </li>
-                                <li class="digits" onclick="webphone.getDialpad().dial(8);">
-                                    <p><strong>8</strong><sup>tuv</sup></p>
-                                </li>
-                                <li class="digits" onclick="webphone.getDialpad().dial(9);">
-                                    <p><strong>9</strong><sup>wxyz</sup></p>
-                                </li>
-                                <li class="digits" onclick="webphone.getDialpad().dial('*');">
-                                    <p><strong>*</strong></p>
-                                </li>
-                                <li class="digits" onclick="webphone.getDialpad().dial(0);">
-                                    <p><strong>0</strong><sup>+</sup></p>
-                                </li>
-                                <li class="digits" onclick="webphone.getDialpad().dial('#');">
-                                    <p><strong>#</strong></p>
-                                </li>
-                                <li class="digits" onclick="webphone.getDialpad().clear();">
-                                    <p>
-                                        <strong><i class="fa fa-refresh"></i></strong><sup>Clear</sup>
-                                    </p>
-                                </li>
-                                <li class="digits"
-                                    onclick="webphone.getDialpad().backspace();">
-                                    <p>
-                                        <strong><i class="fa fa-times"></i></strong><sup>Delete</sup>
-                                    </p>
-                                </li>
-                                <li class="digits pad-action"
-                                    onclick="webphone.getDialpad().autoAction();">
-                                    <p>
-                                        <strong><i class="fa fa-phone"></i></strong>
-                                        <sup id="dialpad_action">Call</sup>
-                                    </p>
-                                </li>
-                            </ol>
+            <div class="tab-panels">
+                <div class="tab-panel panel-column" data-tab="default">
+                    <div id="dialpad"></div>
+                </div>
+                <div class="tab-panel panel-column" data-tab="tweaked">
+                    <div id="dialpad_custom_tweaked"></div>
+                </div>
+                <div class="tab-panel panel-column active" data-tab="custom">
+                    <div id="dialpad_themed_input"></div>
+                    <script type="text/javascript">
+                        var dialpadThemedInputConfig = {
+                            root: { elementId: "dialpad_themed_input" },
+                            data: {
+                                dialed: {
+                                    show: true,
+                                    backspace: { show: false },
+                                    clear: { show: false },
+                                    filter: { show: false },
+                                    convert: { show: false },
+                                },
+                                dialpad: { show: false },
+                                controls: { show: false },
+                            },
+                        };
+                        if (webphone.getDialpad()) {
+                            webphone.getDialpad().renderAddTarget(dialpadThemedInputConfig);
+                        }
+                    </script>
+                    <!-- Example dialpad from https://www.jqueryscript.net/other/Creating-A-Responsive-Phone-Dial-Pad-with-jQuery-CSS3-dialpad.html-->
+                    <div id="wrapper">
+                        <div class="dialpad compact"
+                             onkeypress="if (event.keyCode == 13) { webphone.getDialpad().autoAction(); }">
+                            <div class="dials">
+                                <ol>
+                                    <li class="digits" onclick="webphone.getDialpad().dial(1);">
+                                        <p><strong>1</strong></p>
+                                    </li>
+                                    <li class="digits" onclick="webphone.getDialpad().dial(2);">
+                                        <p><strong>2</strong><sup>abc</sup></p>
+                                    </li>
+                                    <li class="digits" onclick="webphone.getDialpad().dial(3);">
+                                        <p><strong>3</strong><sup>def</sup></p>
+                                    </li>
+                                    <li class="digits" onclick="webphone.getDialpad().dial(4);">
+                                        <p><strong>4</strong><sup>ghi</sup></p>
+                                    </li>
+                                    <li class="digits" onclick="webphone.getDialpad().dial(5);">
+                                        <p><strong>5</strong><sup>jkl</sup></p>
+                                    </li>
+                                    <li class="digits" onclick="webphone.getDialpad().dial(6);">
+                                        <p><strong>6</strong><sup>mno</sup></p>
+                                    </li>
+                                    <li class="digits" onclick="webphone.getDialpad().dial(7);">
+                                        <p><strong>7</strong><sup>pqrs</sup></p>
+                                    </li>
+                                    <li class="digits" onclick="webphone.getDialpad().dial(8);">
+                                        <p><strong>8</strong><sup>tuv</sup></p>
+                                    </li>
+                                    <li class="digits" onclick="webphone.getDialpad().dial(9);">
+                                        <p><strong>9</strong><sup>wxyz</sup></p>
+                                    </li>
+                                    <li class="digits" onclick="webphone.getDialpad().dial('*');">
+                                        <p><strong>*</strong></p>
+                                    </li>
+                                    <li class="digits" onclick="webphone.getDialpad().dial(0);">
+                                        <p><strong>0</strong><sup>+</sup></p>
+                                    </li>
+                                    <li class="digits" onclick="webphone.getDialpad().dial('#');">
+                                        <p><strong>#</strong></p>
+                                    </li>
+                                    <li class="digits" onclick="webphone.getDialpad().clear();">
+                                        <p>
+                                            <strong><i class="fa fa-refresh"></i></strong><sup>Clear</sup>
+                                        </p>
+                                    </li>
+                                    <li class="digits"
+                                        onclick="webphone.getDialpad().backspace();">
+                                        <p>
+                                            <strong><i class="fa fa-times"></i></strong><sup>Delete</sup>
+                                        </p>
+                                    </li>
+                                    <li class="digits pad-action"
+                                        onclick="webphone.getDialpad().autoAction();">
+                                        <p>
+                                            <strong><i class="fa fa-phone"></i></strong>
+                                            <sup id="dialpad_action">Call</sup>
+                                        </p>
+                                    </li>
+                                </ol>
+                            </div>
                         </div>
                     </div>
-                </div>
-                <script type="text/javascript">
-                    let callback = () => {
-                        let color = "#093";
-                        if (webphone.getDialpad()) {
-                            switch (webphone.getDialpad().getAutoAction()) {
-                                case "answer":
-                                    document.getElementById("dialpad_action").innerHTML =
-                                        "Answer";
-                                    break;
-                                case "redial":
-                                    document.getElementById("dialpad_action").innerHTML =
-                                        "Redial";
-                                    break;
-                                case "call":
-                                    document.getElementById("dialpad_action").innerHTML =
-                                        "Call";
-                                    break;
-                                case "transfer":
-                                    document.getElementById("dialpad_action").innerHTML =
-                                        "Transfer";
-                                    color = "#0000ffba";
-                                    break;
-                                case "terminate":
-                                    document.getElementById("dialpad_action").innerHTML = "End";
-                                    color = "#ff0000ba";
-                                    break;
+                    <script type="text/javascript">
+                        let callback = () => {
+                            let color = "#1a9e5c";
+                            if (webphone.getDialpad()) {
+                                switch (webphone.getDialpad().getAutoAction()) {
+                                    case "answer":
+                                        document.getElementById("dialpad_action").innerHTML =
+                                            "Answer";
+                                        break;
+                                    case "redial":
+                                        document.getElementById("dialpad_action").innerHTML =
+                                            "Redial";
+                                        break;
+                                    case "call":
+                                        document.getElementById("dialpad_action").innerHTML =
+                                            "Call";
+                                        break;
+                                    case "transfer":
+                                        document.getElementById("dialpad_action").innerHTML =
+                                            "Transfer";
+                                        color = "#007bff";
+                                        break;
+                                    case "terminate":
+                                        document.getElementById("dialpad_action").innerHTML = "End";
+                                        color = "#e0393e";
+                                        break;
+                                }
                             }
-                        }
 
-                        let elements = document.getElementsByClassName("pad-action");
-                        for (let element of elements) {
-                            element.style.background = color;
-                        }
-                    };
-                    webphone.on("call.primary.update", callback);
-                    webphone.on("dialpad.target.updated", callback);
-                    callback();
-                </script>
+                            let elements = document.getElementsByClassName("pad-action");
+                            for (let element of elements) {
+                                element.style.background = color;
+                            }
+                        };
+                        webphone.on("call.primary.update", callback);
+                        webphone.on("dialpad.target.updated", callback);
+                        callback();
+                    </script>
+                </div>
             </div>
         </div>
 
         <!-- BLF -->
-        <div class="row" style="border: solid;" id="blf_row">
-            <div class="col" style="border-right: dashed;">
-                <strong>BLF (default render)</strong>
-                <div id="blf_default"></div>
+        <div class="panel" id="blf_row">
+            <div class="panel-header">BLF</div>
+            <div class="tabs">
+                <button type="button" class="tab-btn" data-tab="default">Default</button>
+                <button type="button" class="tab-btn active" data-tab="custom">Custom</button>
             </div>
-            <div class="col" style="border-right: dashed;">
-                <strong>BLF (custom render)</strong>
-                <div id="blf_custom" class="blf-keys"></div>
-                <script type="text/javascript">
-                    if (webphone.getBLF()) {
-                        renderBLFCustom();
-                    }
-                </script>
-            </div>
-            <div class="col">
-                <strong>Add subscription</strong>
-                <div style="margin-top: 8px; display: flex; flex-direction: column; gap: 6px; max-width: 240px;">
-                    <input id="blf_adhoc_id" type="text" class="form-control form-control-sm" placeholder="Extension (e.g. 1004)" />
-                    <input id="blf_adhoc_name" type="text" class="form-control form-control-sm" placeholder="Label (optional)" />
-                    <div style="display: flex; gap: 6px;">
-                        <button class="btn btn-sm btn-success" onclick="blfAdhocSubscribe()">Subscribe</button>
-                        <button class="btn btn-sm btn-danger" onclick="blfAdhocUnsubscribe()">Remove</button>
+            <div class="panel-columns">
+                <div class="tab-panels panel-column">
+                    <div class="tab-panel" data-tab="default">
+                        <div id="blf_default"></div>
+                    </div>
+                    <div class="tab-panel active" data-tab="custom">
+                        <div id="blf_custom" class="blf-keys"></div>
+                        <script type="text/javascript">
+                            if (webphone.getBLF()) {
+                                renderBLFCustom();
+                            }
+                        </script>
                     </div>
                 </div>
-                <script type="text/javascript">
-                    function blfAdhocSubscribe() {
-                        const blf = webphone.getBLF();
-                        if (!blf) return;
-                        const id = document.getElementById("blf_adhoc_id").value.trim();
-                        const name = document.getElementById("blf_adhoc_name").value.trim();
-                        if (!id) return;
-                        blf.addKey(id, name || id);
-                        document.getElementById("blf_adhoc_id").value = "";
-                        document.getElementById("blf_adhoc_name").value = "";
-                        renderBLFCustom();
-                    }
+                <div class="panel-column">
+                    <div class="panel-column-label">Add Subscription</div>
+                    <div class="blf-adhoc-form">
+                        <input id="blf_adhoc_id" type="text" placeholder="Extension (e.g. 1004)" />
+                        <input id="blf_adhoc_name" type="text" placeholder="Label (optional)" />
+                        <div class="blf-adhoc-actions">
+                            <button class="btn-primary" onclick="blfAdhocSubscribe()">Subscribe</button>
+                            <button class="btn-danger" onclick="blfAdhocUnsubscribe()">Remove</button>
+                        </div>
+                    </div>
+                    <script type="text/javascript">
+                        function blfAdhocSubscribe() {
+                            const blf = webphone.getBLF();
+                            if (!blf) return;
+                            const id = document.getElementById("blf_adhoc_id").value.trim();
+                            const name = document.getElementById("blf_adhoc_name").value.trim();
+                            if (!id) return;
+                            blf.addKey(id, name || id);
+                            document.getElementById("blf_adhoc_id").value = "";
+                            document.getElementById("blf_adhoc_name").value = "";
+                            renderBLFCustom();
+                        }
 
-                    function blfAdhocUnsubscribe() {
-                        const blf = webphone.getBLF();
-                        if (!blf) return;
-                        const id = document.getElementById("blf_adhoc_id").value.trim();
-                        if (!id) return;
-                        blf.removeKey(id);
-                        document.getElementById("blf_adhoc_id").value = "";
-                        document.getElementById("blf_adhoc_name").value = "";
-                        renderBLFCustom();
-                    }
-                </script>
+                        function blfAdhocUnsubscribe() {
+                            const blf = webphone.getBLF();
+                            if (!blf) return;
+                            const id = document.getElementById("blf_adhoc_id").value.trim();
+                            if (!id) return;
+                            blf.removeKey(id);
+                            document.getElementById("blf_adhoc_id").value = "";
+                            document.getElementById("blf_adhoc_name").value = "";
+                            renderBLFCustom();
+                        }
+                    </script>
+                </div>
             </div>
         </div>
         <script type="text/javascript">
@@ -1029,28 +1625,76 @@
         </script>
 
         <!-- Call Control -->
-        <div class="row" style="border: solid;">
-            <div class="col" style="border-right: dashed;">
-                <div id="call_control"></div>
+        <div class="panel">
+            <div class="panel-header">
+                Call Control
+                <span class="panel-header-meta" id="conference_meta"></span>
             </div>
-            <div class="col" style="border-right: dashed;"></div>
-            <div class="col"></div>
+            <div class="panel-columns panel-columns--single">
+                <div class="panel-column">
+                    <div id="call_control"></div>
+                </div>
+            </div>
         </div>
+        <script type="text/javascript">
+            var conferenceMeta = document.getElementById("conference_meta");
+            if (webphone.getConference() && config.conference && config.conference.maxParticipants) {
+                conferenceMeta.textContent = "Conference Max Participants: " + config.conference.maxParticipants;
+            }
+        </script>
 
         <!-- Call List -->
-        <div class="row" style="border: solid;">
-            <div class="col">
-                <div id="call_list"></div>
+        <div class="panel">
+            <div class="panel-header">Call List</div>
+            <div class="panel-columns panel-columns--single">
+                <div class="panel-column">
+                    <div id="call_list"></div>
+                </div>
             </div>
         </div>
 
         <!-- Video Canvas -->
-        <div class="row" style="border: solid;">
-            <div class="col">
-                <canvas id="video_screen" width="640" height="480"></canvas>
-                <div id="video_controls"></div>
+        <div class="panel" id="video_panel">
+            <div class="panel-header">Video</div>
+            <div class="panel-columns panel-columns--single">
+                <div class="panel-column">
+                    <canvas id="video_screen" width="640" height="480"></canvas>
+                    <div id="video_controls"></div>
+                </div>
             </div>
         </div>
+        <script type="text/javascript">
+            function updateVideoPanelVisibility() {
+                const mediaDevices = webphone.getMediaDevices();
+                const panel = document.getElementById("video_panel");
+                if (!mediaDevices || !panel) return;
+                const preferedDevice = mediaDevices.getPreferedDevice("videoinput");
+                const hasVideo = !!preferedDevice && preferedDevice.id !== "none";
+                panel.style.display = hasVideo ? "" : "none";
+            }
+            webphone.on("mediaDevices.devices.loaded", updateVideoPanelVisibility);
+            webphone.on("mediaDevices.video.input.changed", updateVideoPanelVisibility);
+            updateVideoPanelVisibility();
+        </script>
+
+        <script type="text/javascript">
+            document.querySelectorAll(".tabs").forEach((tabs) => {
+                const container = tabs.closest(".panel").querySelector(".tab-panels");
+                const buttons = tabs.querySelectorAll(".tab-btn");
+                const panels = container.querySelectorAll(".tab-panel");
+
+                buttons.forEach((button) => {
+                    button.onclick = () => {
+                        buttons.forEach((b) => b.classList.remove("active"));
+                        panels.forEach((p) => p.classList.remove("active"));
+                        button.classList.add("active");
+                        container
+                            .querySelector('.tab-panel[data-tab="' + button.dataset.tab + '"]')
+                            .classList.add("active");
+                    };
+                });
+            });
+        </script>
     </div>
 </body>
 </html>

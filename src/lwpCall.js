@@ -130,6 +130,19 @@ export default class {
     return this._primary;
   }
 
+  isInConference() {
+    return this._conferenceActive;
+  }
+
+  /**
+   * The active conference's GUID (shared by every call currently in the
+   * same conference, including ones added later), or null when this call
+   * isn't in one. See lwpConference.getConferenceId().
+   */
+  getConferenceId() {
+    return this._conferenceId;
+  }
+
   getRemoteAudio() {
     return this._streams.remote.elements.audio;
   }
@@ -322,7 +335,24 @@ export default class {
    */
   mute(options = { audio: true, video: true }) {
     if (this.hasSession()) {
-      this._getSession().mute(options);
+      if (this.isInConference() && options.audio) {
+        // The sender's audio track is a shared conference mix, not our mic -
+        // toggling it (or JsSIP's own track.enabled mute) would silence us
+        // for every other party at once. lwpConference owns the actual gain
+        // node AND the mute state itself (not this call) - mute is a
+        // conference-wide concept (one shared mic), and which lwpCall is
+        // "primary"/focused can change mid-conference via switchLeg(), so
+        // the state can't live on a single call instance without going
+        // stale for the other leg. We just mirror the normal muted event so
+        // existing UI keeps working unchanged.
+        this._emit("conference.mute.changed", this, true);
+        this._emit("muted", this, { audio: true, video: false });
+        if (options.video) {
+          this._getSession().mute({ video: true });
+        }
+      } else {
+        this._getSession().mute(options);
+      }
     }
   }
 
@@ -331,7 +361,15 @@ export default class {
    */
   unmute(options = { audio: true, video: true }) {
     if (this.hasSession()) {
-      this._getSession().unmute(options);
+      if (this.isInConference() && options.audio) {
+        this._emit("conference.mute.changed", this, false);
+        this._emit("unmuted", this, { audio: true, video: false });
+        if (options.video) {
+          this._getSession().unmute({ video: true });
+        }
+      } else {
+        this._getSession().unmute(options);
+      }
     }
   }
 
@@ -340,6 +378,11 @@ export default class {
 
     if (this.hasSession()) {
       status = this._getSession().isMuted();
+
+      if (this.isInConference()) {
+        const conference = this._libwebphone.getConference();
+        status.audio = conference ? conference.isMuted() : false;
+      }
     }
 
     if (details) {
@@ -361,7 +404,38 @@ export default class {
         }
 
         if (target) {
-          this._getSession().refer(target);
+          // A 2xx response to the REFER itself only means the request was
+          // accepted for processing - it says nothing about whether the
+          // transfer target actually answered. That's only known once the
+          // far end sends a NOTIFY as the referred-to call progresses,
+          // which is what the returned subscriber surfaces. Previously
+          // this return value was discarded entirely, so nothing ever
+          // found out whether a blind transfer actually succeeded - the
+          // original call just sat there regardless of the outcome.
+          const referSubscriber = this._getSession().refer(target);
+
+          referSubscriber.on("accepted", () => {
+            // The referred-to call was answered - this leg's job is done,
+            // the same way a desk phone releases itself once a blind
+            // transfer connects.
+            this._emit("transfer.confirmed", this, target);
+            this.hangup();
+          });
+
+          referSubscriber.on("failed", () => {
+            if (autoHold) {
+              this.unhold();
+            }
+            this._emit("transfer.failed", this, target);
+          });
+
+          referSubscriber.on("requestFailed", () => {
+            if (autoHold) {
+              this.unhold();
+            }
+            this._emit("transfer.failed", this, target);
+          });
+
           this._emit("transfer.started", this, target);
         } else {
           if (autoHold) {
@@ -480,7 +554,7 @@ export default class {
     }
   }
 
-  replaceSenderTrack(newTrack) {
+  replaceSenderTrack(newTrack, renegotiate = true) {
     const peerConnection = this.getPeerConnection();
     if (!peerConnection) {
       return;
@@ -503,11 +577,15 @@ export default class {
 
     if (sender) {
       sender.replaceTrack(newTrack).then(() => {
-        this.renegotiate();
+        if (renegotiate) {
+          this.renegotiate();
+        }
       });
     } else {
       peerConnection.addTrack(newTrack);
-      this.renegotiate();
+      if (renegotiate) {
+        this.renegotiate();
+      }
     }
   }
 
@@ -552,6 +630,8 @@ export default class {
       isAudioMuted,
       isVideoMuted,
       primary: this.isPrimary(),
+      inConference: this.isInConference(),
+      conferenceId: this.getConferenceId(),
       inTransfer: this.isInTransfer(),
       direction: direction,
       terminating: direction == "terminating",
@@ -597,6 +677,10 @@ export default class {
     this._primary = false;
 
     this._inTransfer = false;
+
+    this._conferenceActive = false;
+
+    this._conferenceId = null;
 
     this._remoteIdentityOverride = null;
 
@@ -665,7 +749,10 @@ export default class {
     this._libwebphone.on(
       "mediaDevices.audio.input.changed",
       (lwp, mediaDevices, newTrack) => {
-        if (this.hasSession()) {
+        // While in a conference the sender carries the mixed output, not a
+        // direct mic track - lwpConference owns reconnecting the mic tap on
+        // this same event, so replacing the sender here would fight it.
+        if (this.hasSession() && !this.isInConference()) {
           if (newTrack) {
             this.replaceSenderTrack(newTrack.track);
           } else {
@@ -878,7 +965,7 @@ export default class {
     return this._session;
   }
 
-  _setPrimary(resume = true) {
+  _setPrimary(resume = true, connectStreams = true) {
     if (this.isPrimary()) {
       return;
     }
@@ -891,11 +978,23 @@ export default class {
 
     this._primary = true;
 
-    this._connectStreams();
+    if (connectStreams) {
+      this._connectStreams();
+    }
   }
 
-  _clearPrimary(pause = true) {
+  _clearPrimary(pause = true, disconnectStreams = true) {
     if (!this.isPrimary()) {
+      return;
+    }
+
+    if (pause && this.isInConference()) {
+      // Ordinary call-list traffic (a new call arriving, switching calls)
+      // must not hold/disconnect a leg that's live in a conference. The
+      // call's own session-ended cleanup path passes pause=false and is
+      // unaffected by this guard - as does lwpConference.switchLeg(),
+      // which also passes pause=false since it deliberately re-uses this
+      // method purely for its flag-flip + promoted/demoted events.
       return;
     }
 
@@ -911,7 +1010,9 @@ export default class {
       this.hold();
     }
 
-    this._disconnectStreams();
+    if (disconnectStreams) {
+      this._disconnectStreams();
+    }
 
     this._emit("demoted", this);
   }
@@ -934,7 +1035,12 @@ export default class {
             peerConnection.getSenders().forEach((peer) => {
               const track = peer.track;
               if (track) {
-                track.enabled = !this.isMuted(true)[track.kind];
+                // In conference mode this sender carries the shared mix
+                // output; mute is enforced upstream on the mic gain node,
+                // not by toggling this track (which would silence everyone).
+                if (!this.isInConference()) {
+                  track.enabled = !this.isMuted(true)[track.kind];
+                }
                 peerTracks.push(track);
               }
             });
@@ -1010,7 +1116,7 @@ export default class {
     }
 
     const peerConnection = this.getPeerConnection();
-    if (peerConnection) {
+    if (peerConnection && !this.isInConference()) {
       peerConnection.getSenders().forEach((peer) => {
         if (peer.track) {
           peer.track.enabled = true;
@@ -1052,7 +1158,7 @@ export default class {
     }
 
     const peerConnection = this.getPeerConnection();
-    if (peerConnection) {
+    if (peerConnection && !this.isInConference()) {
       peerConnection.getSenders().forEach((peer) => {
         if (peer.track) {
           peer.track.enabled = false;

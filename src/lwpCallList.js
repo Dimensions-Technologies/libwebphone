@@ -32,6 +32,29 @@ export default class extends lwpRenderer {
   }
 
   addCall(newCall) {
+    const conference = this._libwebphone.getConference();
+    const currentPrimary = this._calls.find((call) => call.isPrimary());
+
+    if (
+      conference &&
+      conference.isActive() &&
+      currentPrimary &&
+      currentPrimary.isInConference()
+    ) {
+      // A conference leg occupies "primary" for the duration of the merge;
+      // ordinary call arrival must not promote a new call out from under it
+      // while focus is still actually on the conference. Once focus has
+      // already moved away (e.g. to the "New Call" placeholder, which also
+      // holds the conference - see switchCall()), a call arriving or being
+      // placed falls through to the normal promotion rules below, exactly
+      // as if no conference were active at all - this is what lets you
+      // click "New Call" during an active conference, dial out, and have
+      // the new call correctly become primary and connect normally.
+      this._calls.push(newCall);
+      this._emit("calls.added", this, newCall);
+      return;
+    }
+
     const previousCall = this.getCall();
 
     if (previousCall && !previousCall.isOnHold()) {
@@ -53,22 +76,79 @@ export default class extends lwpRenderer {
   }
 
   switchCall(callId) {
-    const previousCall = this.getCall();
-    const primaryCall = this.getCall(callId);
+    const conference = this._libwebphone.getConference();
+    // Finds whoever is actually primary right now, not just whoever has a
+    // session - unlike getCall(), this also finds the session-less "New
+    // Call" placeholder when it's the current selection, which matters for
+    // the self-click guard just below.
+    const previousCall = this._calls.find((call) => call.isPrimary());
+    const targetCall = this.getCall(callId);
 
-    this._calls.map((call) => {
-      if (call.isPrimary) {
-        call._clearPrimary();
+    if (!targetCall) {
+      return;
+    }
+
+    if (previousCall && previousCall.getId() === callId) {
+      // Already the primary call - the default template's <label> wraps
+      // its entire detail block (not just its name), so clicking anywhere
+      // in an established call's own details re-triggers this. Without
+      // this guard, _clearPrimary()/_setPrimary() below would still run on
+      // the same call: a real hold() immediately followed by unhold(), two
+      // back-to-back re-INVITEs on the same dialog for no actual change.
+      return;
+    }
+
+    if (conference && conference.isActive()) {
+      // Every call in the list is reachable via this same click, so clicks
+      // during an active conference are dispatched on what the target
+      // actually is:
+      // - already a member of the conference -> switch focus to it
+      // - an eligible held call not yet a member -> add it (up to
+      //   maxParticipants)
+      // - anything else (the "New Call" placeholder, or a call that isn't
+      //   held/established, or the conference is at the cap) -> falls
+      //   through to the plain switch below, which is conference-aware on
+      //   both sides
+      if (conference.isLeg(targetCall)) {
+        if (conference.switchLeg(callId)) {
+          this._emit("calls.changed", this, this.getCall(), previousCall);
+        }
+        return;
       }
-    });
 
-    if (primaryCall) {
-      primaryCall._setPrimary();
-      if (primaryCall.hasSession()) {
-        this._emit("calls.changed", this, primaryCall, previousCall);
+      if (conference.canAdd(targetCall)) {
+        conference.addToConference(callId);
+        return;
+      }
+    }
+
+    // Plain focus switch - also covers the "New Call" placeholder and any
+    // ordinary call, conference active or not. Switching away from an
+    // active call has always held it; a conference is just a multi-party
+    // call from this perspective, so switching away from one of its legs
+    // holds the whole conference (every leg, via conference.hold()) rather
+    // than just the one you happened to be focused on - the other
+    // party/parties would otherwise be left live and audible to each
+    // other while you dial something else. Switching back to a leg
+    // resumes the whole conference again automatically - see
+    // switchLeg()'s own isOnHold()/unhold() handling above. A
+    // non-conference call keeps its normal per-call behavior (auto-hold if
+    // established, resume paused elements on return) unchanged.
+    if (previousCall) {
+      if (previousCall.isInConference()) {
+        conference.hold();
+        previousCall._clearPrimary(false, false);
       } else {
-        this._emit("calls.changed", this, null, previousCall);
+        previousCall._clearPrimary();
       }
+    }
+
+    targetCall._setPrimary();
+
+    if (targetCall.hasSession()) {
+      this._emit("calls.changed", this, targetCall, previousCall);
+    } else {
+      this._emit("calls.changed", this, null, previousCall);
     }
   }
 
@@ -171,10 +251,40 @@ export default class extends lwpRenderer {
     this._libwebphone.on("call.unmuted", () => {
       this.updateRenders();
     });
+    this._libwebphone.on("conference.started", () => {
+      this.updateRenders();
+    });
+    this._libwebphone.on("conference.split", () => {
+      this.updateRenders();
+    });
+    this._libwebphone.on("conference.ended", () => {
+      this.updateRenders();
+    });
+    this._libwebphone.on("conference.leg.switched", () => {
+      this.updateRenders();
+    });
+    this._libwebphone.on("conference.hold", () => {
+      this.updateRenders();
+    });
+    this._libwebphone.on("conference.unhold", () => {
+      this.updateRenders();
+    });
+    this._libwebphone.on("conference.caller.muted", () => {
+      this.updateRenders();
+    });
+    this._libwebphone.on("conference.caller.unmuted", () => {
+      this.updateRenders();
+    });
+    this._libwebphone.on("conference.leg.added", () => {
+      this.updateRenders();
+    });
+    this._libwebphone.on("conference.leg.removed", () => {
+      this.updateRenders();
+    });
     this._libwebphone.on("call.transfer.collecting", () => {
       this.updateRenders();
     });
-    this._libwebphone.on("call.transfer.completed", () => {
+    this._libwebphone.on("call.transfer.complete", () => {
       this.updateRenders();
     });
 
@@ -247,7 +357,10 @@ export default class extends lwpRenderer {
             <li>progress: {{progress}}</li>
             <li>established: {{established}}</li>
             <li>held: {{held}}</li>
-            <li>muted: {{muted}}</li>
+            <li>inConference: {{inConference}}</li>
+            <li>conferenceId: {{conferenceId}}</li>
+            <li>audio muted: {{isAudioMuted}}</li>
+            <li>caller muted: {{callerMuted}}</li>
             <li>inTransfer: {{inTransfer}}</li>
             <li>ended: {{ended}}</li>
             <li>direction: {{direction}}</li>
@@ -261,8 +374,12 @@ export default class extends lwpRenderer {
   }
 
   _renderData(data = {}) {
+    const conference = this._libwebphone.getConference();
+
     data.calls = this.getCalls().map((call) => {
-      return call.summary();
+      const summary = call.summary();
+      summary.callerMuted = conference ? conference.isCallerMuted(call) : false;
+      return summary;
     });
 
     data.primary = this.getCall();

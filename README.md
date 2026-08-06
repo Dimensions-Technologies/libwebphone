@@ -44,14 +44,19 @@ The library provides multiple ways to interact with it. The quick start example 
       $ npm install
 ```
 
-4. Replace the following placeholder on the index.html configuration with appropriate values:
+4. Copy the example configuration and fill in your own SIP details:
 
-- `{SIP_SERVER}`
-- `{SIP_USERNAME}`
-- `{SIP_PASSWORD}`
-- `{SIP_DOMAIN}`
+```bash
+      $ cp config.example.json config.json
+```
 
-> NOTE: The `{SIP_USERNAME}`, `{SIP_PASSWORD}` and `{SIP_DOMAIN}` can be changed via the lwpUserAgent default form and are not required to be changed in the configuration (they would need to be changed on the form prior to starting the user agent). However, failure to update `{SIP_SERVER}` will cause the library to crash on start up.
+Edit `config.json` and set at least `userAgent.transport.sockets` (your SIP
+server's websocket URL) and `userAgent.authentication.username`/`password`/
+`realm`. `index.html` loads this file at runtime.
+
+> NOTE: `config.json` is gitignored - it's expected to hold real credentials and should never be committed. `config.example.json` is the template that _is_ committed, so keep it free of real values if you add new options to it.
+
+> NOTE: `username`, `password` and `realm` can also be left blank in `config.json` and entered via the lwpUserAgent default form in the browser instead (they'd need to be typed in before starting the user agent each time). However, `transport.sockets` must point at a real SIP server or the library will fail to start.
 
 5. Start a continuous process that will build the library, rebuild if any source files are changed as well as a webserver to serve the artifacts. Once started it will print a URL to the screen that can be visted, only by the computer it was started on, in the browser to create an example / developer instance of the library.
 
@@ -154,8 +159,10 @@ The phone funtionality is implemented by classes that encapsulated the logic for
 - [lwpMediaDevices](docs/lwpMediaDevices.md) : Provides all features for discovering and selecting the media device (microphone, camera and audio output destination)
 - [lwpAudioContext](docs/lwpAudioContext.md) : Provides audio generation (ringing, DTMF playback, ect) as well as audio routing / mixing options
 - [lwpCallList](docs/lwpCallList.md) : Provides a list of all active calls and allowes the user to switch between them
+- [lwpConference](docs/lwpConference.md) : Provides local, browser-mixed ad-hoc conferencing for up to `maxParticipants` calls - merge, grow, hold, mute and split, with no server-side bridge or SDP renegotiation
 - [lwpDialpad](docs/lwpDialpad.md) : Provides all features for collecting the target (dialed number) for new calls, transfers and in call DTMF
 - [lwpCallControl](docs/lwpCallControl.md) : Provides all call control features such as hold, mute, transfer, redial, ect
+- [lwpBLF](docs/lwpBLF.md) : Provides Busy Lamp Field monitoring - subscribes to other extensions' SIP dialog/presence state to track idle/ringing/in-call status
 
 Each of these clases can be disabled via configuration (or modified build) if the provided functionality is not required or desired.
 
@@ -313,6 +320,9 @@ For details of what translations are currently available see the individual clas
 | dialpad      | object | {}      | See [lwpDialpad configuration](docs/lwpDialpad.md#configuration)           |
 | callControl  | object | {}      | See [lwpCallControl configuration](docs/lwpCallControl.md#configuration)   |
 | call         | object | {}      | See [lwpCall configuration](docs/lwpCall.md#configuration)                 |
+| conference   | object | {}      | See [lwpConference configuration](docs/lwpConference.md#configuration)     |
+| blf          | object | {}      | See [lwpBLF configuration](docs/lwpBLF.md#configuration)                   |
+| codecPreferences | object | {} | Restricts/reorders which codecs are offered in outbound call SDP - not namespaced under `call`, see [lwpCall - Codec Preferences](docs/lwpCall.md#codec-preferences) |
 
 ## Events
 
