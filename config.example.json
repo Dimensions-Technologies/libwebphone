@@ -1,0 +1,143 @@
+{
+    "dialpad": {
+        "renderTargets": [
+            "dialpad",
+            {
+                "root": {
+                    "elementId": "dialpad_custom_tweaked"
+                },
+                "data": {
+                    "dialed": {
+                        "show": true,
+                        "filter": {
+                            "show": false
+                        },
+                        "convert": {
+                            "show": false
+                        }
+                    },
+                    "dialpad": {
+                        "show": false
+                    },
+                    "controls": {
+                        "show": true
+                    }
+                }
+            }
+        ]
+    },
+    "callControl": {
+        "renderTargets": [
+            "call_control"
+        ]
+    },
+    "conference": {
+        "enabled": true,
+        "maxParticipants": 5
+    },
+    "mediaDevices": {
+        "audioinput": {
+            "preferedDeviceIds": []
+        },
+        "videoinput": {
+            "enabled": true,
+            "preferedDeviceIds": [
+                "none"
+            ]
+        },
+        "renderTargets": [
+            "media_device",
+            {
+                "root": {
+                    "elementId": "media_device_tweaked"
+                },
+                "data": {
+                    "ringoutput": {
+                        "show": false
+                    },
+                    "audiooutput": {
+                        "show": false
+                    },
+                    "audioinput": {
+                        "show": false
+                    }
+                }
+            }
+        ]
+    },
+    "audioContext": {
+        "renderTargets": [
+            "audio_context",
+            {
+                "root": {
+                    "elementId": "audio_context_tweaked"
+                },
+                "data": {
+                    "input": {
+                        "local": {
+                            "show": false
+                        }
+                    },
+                    "output": {
+                        "preview": {
+                            "show": false
+                        }
+                    }
+                }
+            }
+        ]
+    },
+    "codecPreferences": {
+        "audio": [
+            "OPUS"
+        ],
+        "video": []
+    },
+    "userAgent": {
+        "renderTargets": [
+            "user_agent"
+        ],
+        "transport": {
+            "sockets": [
+                "wss://your-sip-server.example.com:5065"
+            ],
+            "recovery_max_interval": 30,
+            "recovery_min_interval": 2
+        },
+        "authentication": {
+            "username": "your-sip-username",
+            "password": "your-sip-password",
+            "realm": "your-sip-realm.example.com"
+        },
+        "user_agent": {
+            "instance_id": "generate-your-own-uuid-here",
+            "no_answer_timeout": 60,
+            "register": true,
+            "register_expires": 300,
+            "user_agent": "libwebphone 2.x - dev"
+        }
+    },
+    "videoCanvas": {
+        "canvas": "video_screen",
+        "renderTargets": [
+            "video_controls"
+        ]
+    },
+    "blf": {
+        "enabled": true,
+        "renderTargets": [
+            "blf_default"
+        ],
+        "keys": [],
+        "subscribe_expires": 3600,
+        "resubscribe_delay": 1000,
+        "notify_timeout": 60000
+    },
+    "quickConnect": [
+        {
+            "label": "Quick Connect Example",
+            "username": "your-sip-username",
+            "password": "your-sip-password"
+        }
+    ]
+}

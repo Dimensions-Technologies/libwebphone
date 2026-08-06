@@ -7,6 +7,7 @@ import lwpUtils from "./lwpUtils";
 import lwpUserAgent from "./lwpUserAgent";
 import lwpBLF from "./lwpBLF";
 import lwpCallList from "./lwpCallList";
+import lwpConference from "./lwpConference";
 import lwpCallControl from "./lwpCallControl";
 import lwpDialpad from "./lwpDialpad";
 import lwpMediaDevices from "./lwpMediaDevices";
@@ -40,6 +41,10 @@ export default class extends EventEmitter {
             this._audioContext = new lwpAudioContext(this, this._config.audioContext);
         }
 
+        if (this._config.conference.enabled) {
+            this._conference = new lwpConference(this, this._config.conference);
+        }
+
         if (this._config.callControl.enabled) {
             this._callControl = new lwpCallControl(this, this._config.callControl);
         }
@@ -65,6 +70,10 @@ export default class extends EventEmitter {
 
     getCallList() {
         return this._callList;
+    }
+
+    getConference() {
+        return this._conference;
     }
 
     getDialpad() {
@@ -125,6 +134,7 @@ export default class extends EventEmitter {
             dialpad: { enabled: true },
             blf: { enabled: true, keys: [] },
             callList: { enabled: true },
+            conference: { enabled: true },
             callControl: { enabled: true },
             mediaDevices: { enabled: true },
             mediaPreviews: { enabled: false },
@@ -188,6 +198,13 @@ export default class extends EventEmitter {
         data.unshift(callList);
         data.unshift(this._libwebphone);
         data.unshift("callList." + type);
+        this._libwebphone._emit.apply(this._libwebphone, data);
+    }
+
+    _conferenceEvent(type, conference, ...data) {
+        data.unshift(conference);
+        data.unshift(this._libwebphone);
+        data.unshift("conference." + type);
         this._libwebphone._emit.apply(this._libwebphone, data);
     }
 

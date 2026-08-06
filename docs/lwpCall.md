@@ -68,6 +68,22 @@ Returns:
 | ------- | -------------------------------------------------------------- |
 | boolean | True when the instance represents the currently connected call |
 
+#### isInConference()
+
+Returns:
+
+| Type    | Description                                                                             |
+| ------- | ----------------------------------------------------------------------------------------- |
+| boolean | True when this call is currently a member of a local [lwpConference](lwpConference.md) |
+
+#### getConferenceId()
+
+Returns:
+
+| Type           | Description                                                              |
+| -------------- | ---------------------------------------------------------------------------- |
+| string or null | The active conference's GUID, shared by every other call currently in the same conference, or null when isInConference() is false. See [lwpConference](lwpConference.md).getConferenceId(). Useful for grouping calls belonging to the same conference in your own UI without needing to ask lwpConference which calls are its legs. |
+
 #### getRemoteAudio()
 
 Returns:
@@ -327,6 +343,17 @@ failed and autoHold is true, the call will be unheld.
 When the transfer method is invoked with a target, the transfer is attempted
 immediately.
 
+Sending the SIP REFER and getting a successful response to it (`transfer.started`)
+only means the request was accepted for processing - it says nothing about
+whether the transfer target actually answered. That's only known once the far
+end sends a NOTIFY as the referred-to call progresses:
+- If the NOTIFY reports the referred-to call was answered, this call's job is
+  done - the same way a desk phone releases itself once a blind transfer
+  connects - so it hangs up automatically and emits `transfer.confirmed`.
+- If the NOTIFY reports failure, or the REFER request itself is rejected, this
+  behaves like any other failed transfer attempt: `transfer.failed` is
+  emitted, and if autoHold was used to hold the call it is unheld again.
+
 > NOTE! If an external application places a call on hold, then attempts a
 > transfer by providing the target argument but leaves the autoHold enabled, if
 > the transfer fails the call will be unheld.
@@ -420,10 +447,11 @@ from the call and trigger a renegotiation.
 
 #### summary()
 
-Returns:
-
-callId hassession progress established ended hold muted primary inTransfer
-direction terminating originating localIdentity remoteIdentity
+Returns an object with: callId, hasSession, progress, established, ended,
+held, isAudioMuted, isVideoMuted, primary, inConference, conferenceId,
+inTransfer, direction, terminating, originating, localIdentity,
+remoteIdentity, remoteIdentityOverride - see the corresponding
+getter/method above for each field's meaning.
 
 ## Configuration
 
@@ -445,6 +473,33 @@ direction terminating originating localIdentity remoteIdentity
 > update the sinkId (destination device) as well as the volume when
 > lwpAudioContext remote channel is changed.
 
+#### Codec Preferences
+
+Unlike the rest of this page, this is read from the **top-level** libwebphone
+config (`config.codecPreferences`), not `config.call` - it isn't per-call
+config a consumer sets on individual calls, it applies to every call this
+class creates.
+
+| Name              | Type   | Default        | Description                                                                 |
+| ------------------ | ------ | --------------- | ----------------------------------------------------------------------------- |
+| codecPreferences.audio | array | [] (no filtering) | Ordered list of preferred audio codecs, e.g. `["OPUS"]` |
+| codecPreferences.video | array | [] (no filtering) | Ordered list of preferred video codecs |
+
+When non-empty, outbound SDP is munged (on generation, before it's sent) to
+keep only the payload types matching an entry in the list - matched either by
+codec name alone (`"OPUS"`) or a full `name/clockrate[/channels]` key
+(`"opus/48000/2"`), case-insensitively. Ancillary payload types
+(`telephone-event`, `cn`, `rtx`, `red`, `ulpfec` - DTMF and comfort-noise/
+redundancy related) are always kept regardless of preference, since removing
+them would break DTMF or resilience features unrelated to codec choice. If
+none of the preferred codecs are present in the original SDP, munging is
+skipped entirely and the original SDP is sent unmodified - a misconfigured
+preference list degrades to "no filtering" rather than breaking the call.
+
+Per-call overrides are also supported: if the [lwpUserAgent](lwpUserAgent.md)
+session used to construct a call carries `session.data.codecPreferences`, it
+takes priority over the top-level config for that call only.
+
 > The spacebar shortcut works like a
 > [push-to-talk](https://en.wikipedia.org/wiki/Push-to-talk) if the call is
 > already muted. This can be useful if, for instance, you are in a conference
@@ -460,8 +515,9 @@ direction terminating originating localIdentity remoteIdentity
 | call.created                       |                                                                                                                            | Emitted when the class is instantiated                                                                                                                                                                                                                                                                      |
 | call.transfer.collecting           |                                                                                                                            | Emitted when the call begins collecting the transfer target from lwpDialpad                                                                                                                                                                                                                                 |
 | call.transfer.started              | target (string)                                                                                                            | Emitted after succesfully sending a SIP REFER (to transfer the call to the target)                                                                                                                                                                                                                          |
-| call.transfer.failed               | target (string)                                                                                                            | Emitted when the tranfer attempt is issued but fails                                                                                                                                                                                                                                                        |
-| call.transfer.complete             | target (string)                                                                                                            | Emitted when the tranfer attempt is completed (success or failure)                                                                                                                                                                                                                                          |
+| call.transfer.failed               | target (string)                                                                                                            | Emitted when no target was collected, the REFER request itself was rejected, or the far end's NOTIFY reports the referred-to call failed                                                                                                                                                                    |
+| call.transfer.complete             | target (string)                                                                                                            | Emitted once the transfer() call itself has finished running (i.e. the REFER was sent, or sending it failed) - not a statement about whether the transfer ultimately succeeds, see transfer.confirmed for that                                                                                             |
+| call.transfer.confirmed            | target (string)                                                                                                            | Emitted when the far end's NOTIFY confirms the referred-to call was answered; this call then hangs up automatically, same as a desk phone releasing itself once a blind transfer connects                                                                                                                  |
 | call.answered                      |                                                                                                                            | Emitted when the call has been successfully answered                                                                                                                                                                                                                                                        |
 | call.rejected                      |                                                                                                                            | Emitted when a terminating call has been successfully rejected (requires developers to use the lwpCall.reject() function)                                                                                                                                                                                   |
 | call.renegotiated                  |                                                                                                                            | Emitted when the call has been successully renegotiated                                                                                                                                                                                                                                                     |

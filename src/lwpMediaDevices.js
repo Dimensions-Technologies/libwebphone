@@ -567,16 +567,24 @@ export default class extends lwpRenderer {
       constraints.audio &&
       this._config.audioinput.preferedDeviceIds.length > 0
     ) {
-      constraints.audio = {};
-      constraints.audio.deviceId = this._config.audioinput.preferedDeviceIds;
+      if (this._config.audioinput.preferedDeviceIds.includes("none")) {
+        constraints.audio = false;
+      } else {
+        constraints.audio = {};
+        constraints.audio.deviceId = this._config.audioinput.preferedDeviceIds;
+      }
     }
 
     if (
       constraints.video &&
       this._config.videoinput.preferedDeviceIds.length > 0
     ) {
-      constraints.video = {};
-      constraints.video.deviceId = this._config.videoinput.preferedDeviceIds;
+      if (this._config.videoinput.preferedDeviceIds.includes("none")) {
+        constraints.video = false;
+      } else {
+        constraints.video = {};
+        constraints.video.deviceId = this._config.videoinput.preferedDeviceIds;
+      }
     }
 
     this._mediaStreamPromise = this._shimGetUserMedia(constraints)

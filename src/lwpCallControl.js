@@ -51,6 +51,20 @@ export default class extends lwpRenderer {
     }
   }
 
+  holdConference() {
+    const conference = this._libwebphone.getConference();
+    if (conference) {
+      conference.hold();
+    }
+  }
+
+  unholdConference() {
+    const conference = this._libwebphone.getConference();
+    if (conference) {
+      conference.unhold();
+    }
+  }
+
   mute() {
     const currentCall = this._getCall();
     if (currentCall) {
@@ -62,6 +76,26 @@ export default class extends lwpRenderer {
     const currentCall = this._getCall();
     if (currentCall) {
       currentCall.unmute({ audio: true });
+    }
+  }
+
+  muteCaller() {
+    const currentCall = this._getCall();
+    if (currentCall && currentCall.isInConference()) {
+      const conference = this._libwebphone.getConference();
+      if (conference) {
+        conference.muteCaller();
+      }
+    }
+  }
+
+  unmuteCaller() {
+    const currentCall = this._getCall();
+    if (currentCall && currentCall.isInConference()) {
+      const conference = this._libwebphone.getConference();
+      if (conference) {
+        conference.unmuteCaller();
+      }
     }
   }
 
@@ -83,6 +117,27 @@ export default class extends lwpRenderer {
     const currentCall = this._getCall();
     if (currentCall) {
       currentCall.transfer();
+    }
+  }
+
+  conference() {
+    const conference = this._libwebphone.getConference();
+    if (conference) {
+      conference.merge();
+    }
+  }
+
+  split() {
+    const conference = this._libwebphone.getConference();
+    if (conference) {
+      conference.split();
+    }
+  }
+
+  endConference() {
+    const conference = this._libwebphone.getConference();
+    if (conference) {
+      conference.endConference();
     }
   }
 
@@ -126,11 +181,19 @@ export default class extends lwpRenderer {
         unhold: "Resume",
         mute: "Mute Audio",
         unmute: "Unmute Audio",
+        mutecaller: "Mute Caller",
+        unmutecaller: "Unmute Caller",
         muteVideo: "Mute Video",
         unmuteVideo: "Unmute Video",
         transferblind: "Blind Transfer",
         transferattended: "Attended Transfer",
         transfercomplete: "Transfer (complete)",
+        conference: "Conference",
+        addtoconference: "Add to Conference",
+        split: "Split",
+        endconference: "End Conference",
+        holdconference: "Hold Conference",
+        unholdconference: "Resume Conference",
       },
     };
     const resourceBundles = lwpUtils.merge(
@@ -175,11 +238,42 @@ export default class extends lwpRenderer {
     this._libwebphone.on("call.primary.transfer.collecting", (lwp, call) => {
       this.updateRenders(call);
     });
-    this._libwebphone.on("call.primary.transfer.completed", (lwp, call) => {
+    this._libwebphone.on("call.primary.transfer.complete", (lwp, call) => {
       this.updateRenders(call);
     });
 
     this._libwebphone.on("call.primary.terminated", () => {
+      this.updateRenders();
+    });
+
+    this._libwebphone.on("conference.started", () => {
+      this.updateRenders();
+    });
+    this._libwebphone.on("conference.split", () => {
+      this.updateRenders();
+    });
+    this._libwebphone.on("conference.ended", () => {
+      this.updateRenders();
+    });
+    this._libwebphone.on("conference.failed", () => {
+      this.updateRenders();
+    });
+    this._libwebphone.on("conference.hold", () => {
+      this.updateRenders();
+    });
+    this._libwebphone.on("conference.unhold", () => {
+      this.updateRenders();
+    });
+    this._libwebphone.on("conference.caller.muted", () => {
+      this.updateRenders();
+    });
+    this._libwebphone.on("conference.caller.unmuted", () => {
+      this.updateRenders();
+    });
+    this._libwebphone.on("conference.leg.added", () => {
+      this.updateRenders();
+    });
+    this._libwebphone.on("conference.leg.removed", () => {
       this.updateRenders();
     });
 
@@ -208,11 +302,19 @@ export default class extends lwpRenderer {
         unhold: "libwebphone:callControl.unhold",
         mute: "libwebphone:callControl.mute",
         unmute: "libwebphone:callControl.unmute",
+        mutecaller: "libwebphone:callControl.mutecaller",
+        unmutecaller: "libwebphone:callControl.unmutecaller",
         muteVideo: "libwebphone:callControl.muteVideo",
         unmuteVideo: "libwebphone:callControl.unmuteVideo",
         transfercomplete: "libwebphone:callControl.transfercomplete",
         transferblind: "libwebphone:callControl.transferblind",
         transferattended: "libwebphone:callControl.transferattended",
+        conference: "libwebphone:callControl.conference",
+        addtoconference: "libwebphone:callControl.addtoconference",
+        split: "libwebphone:callControl.split",
+        endconference: "libwebphone:callControl.endconference",
+        holdconference: "libwebphone:callControl.holdconference",
+        unholdconference: "libwebphone:callControl.unholdconference",
       },
       data: lwpUtils.merge({}, this._config, this._renderData()),
       by_id: {
@@ -279,6 +381,24 @@ export default class extends lwpRenderer {
             },
           },
         },
+        mutecaller: {
+          events: {
+            onclick: (event) => {
+              const element = event.srcElement;
+              element.disabled = true;
+              this.muteCaller();
+            },
+          },
+        },
+        unmutecaller: {
+          events: {
+            onclick: (event) => {
+              const element = event.srcElement;
+              element.disabled = true;
+              this.unmuteCaller();
+            },
+          },
+        },
         muteVideo: {
           events: {
             onclick: (event) => {
@@ -301,6 +421,51 @@ export default class extends lwpRenderer {
           events: {
             onclick: () => {
               this.transfer();
+            },
+          },
+        },
+        conference: {
+          events: {
+            onclick: (event) => {
+              const element = event.srcElement;
+              element.disabled = true;
+              this.conference();
+            },
+          },
+        },
+        split: {
+          events: {
+            onclick: (event) => {
+              const element = event.srcElement;
+              element.disabled = true;
+              this.split();
+            },
+          },
+        },
+        endconference: {
+          events: {
+            onclick: (event) => {
+              const element = event.srcElement;
+              element.disabled = true;
+              this.endConference();
+            },
+          },
+        },
+        holdconference: {
+          events: {
+            onclick: (event) => {
+              const element = event.srcElement;
+              element.disabled = true;
+              this.holdConference();
+            },
+          },
+        },
+        unholdconference: {
+          events: {
+            onclick: (event) => {
+              const element = event.srcElement;
+              element.disabled = true;
+              this.unholdConference();
             },
           },
         },
@@ -364,6 +529,20 @@ export default class extends lwpRenderer {
             </button>
           {{/data.call.isAudioMuted}}
 
+          {{#data.call.inConference}}
+            {{^data.callerMuted}}
+              <button id="{{by_id.mutecaller.elementId}}">
+                {{i18n.mutecaller}}
+              </button>
+            {{/data.callerMuted}}
+
+            {{#data.callerMuted}}
+              <button id="{{by_id.unmutecaller.elementId}}">
+                {{i18n.unmutecaller}}
+              </button>
+            {{/data.callerMuted}}
+          {{/data.call.inConference}}
+
           {{^data.call.isVideoMuted}}
             <button id="{{by_id.muteVideo.elementId}}">
               {{i18n.muteVideo}}
@@ -376,15 +555,51 @@ export default class extends lwpRenderer {
             </button>
           {{/data.call.isVideoMuted}}
 
-          <button id="{{by_id.transfer.elementId}}">
-            {{^data.call.inTransfer}}
-              {{i18n.transferblind}}
-            {{/data.call.inTransfer}}
+          {{^data.call.inConference}}
+            <button id="{{by_id.transfer.elementId}}">
+              {{^data.call.inTransfer}}
+                {{i18n.transferblind}}
+              {{/data.call.inTransfer}}
 
-            {{#data.call.inTransfer}}
-              {{i18n.transfercomplete}}
-            {{/data.call.inTransfer}}
-          </button>
+              {{#data.call.inTransfer}}
+                {{i18n.transfercomplete}}
+              {{/data.call.inTransfer}}
+            </button>
+          {{/data.call.inConference}}
+
+          {{#data.canConference}}
+            <button id="{{by_id.conference.elementId}}">
+              {{#data.conferenceActive}}
+                {{i18n.addtoconference}}
+              {{/data.conferenceActive}}
+
+              {{^data.conferenceActive}}
+                {{i18n.conference}}
+              {{/data.conferenceActive}}
+            </button>
+          {{/data.canConference}}
+
+          {{#data.call.inConference}}
+            <button id="{{by_id.split.elementId}}">
+              {{i18n.split}}
+            </button>
+
+            <button id="{{by_id.endconference.elementId}}">
+              {{i18n.endconference}}
+            </button>
+
+            {{^data.conferenceOnHold}}
+              <button id="{{by_id.holdconference.elementId}}">
+                {{i18n.holdconference}}
+              </button>
+            {{/data.conferenceOnHold}}
+
+            {{#data.conferenceOnHold}}
+              <button id="{{by_id.unholdconference.elementId}}">
+                {{i18n.unholdconference}}
+              </button>
+            {{/data.conferenceOnHold}}
+          {{/data.call.inConference}}
         {{/data.call.established}}
 
         {{#data.call.terminating}}
@@ -401,6 +616,7 @@ export default class extends lwpRenderer {
 
   _renderData(data = {}, callSummary = null) {
     const userAgent = this._libwebphone.getUserAgent();
+    const conference = this._libwebphone.getConference();
 
     if (userAgent) {
       data.redial = userAgent.getRedial();
@@ -409,6 +625,14 @@ export default class extends lwpRenderer {
     }
 
     data.call = callSummary;
+
+    data.canConference = conference ? conference.canMerge() : false;
+
+    data.conferenceActive = conference ? conference.isActive() : false;
+
+    data.conferenceOnHold = conference ? conference.isOnHold() : false;
+
+    data.callerMuted = conference ? conference.isCallerMuted() : false;
 
     return data;
   }

@@ -259,6 +259,10 @@ export default class extends lwpRenderer {
     return this._outputAudio.destinationStream.stream;
   }
 
+  getContext() {
+    return this._audioContext;
+  }
+
   updateRenders() {
     this.render((render) => {
       render.data = this._renderData(render.data);
