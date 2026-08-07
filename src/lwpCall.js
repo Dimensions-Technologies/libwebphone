@@ -191,6 +191,18 @@ export default class {
     return this._inTransfer;
   }
 
+  /**
+   * True from the moment attendedTransferStart() marks this call as the
+   * origin of an in-progress attended transfer until either
+   * attendedTransfer() completes it or attendedTransferCancel() aborts it -
+   * deliberately NOT cleared by losing primary (see attendedTransferStart()),
+   * since the expected next step (the consultation call being placed and
+   * taking over primary) does exactly that.
+   */
+  isAttendedTransferPending() {
+    return this._attendedTransferPending;
+  }
+
   getDirection() {
     if (this.hasSession()) {
       if (this._getSession().direction == "incoming") {
@@ -457,6 +469,136 @@ export default class {
     }
   }
 
+  /**
+   * Marks this call as the origin of an attended transfer and holds it, so
+   * the consultation call can be placed and dialed without first switching
+   * the call list's focus to the session-less "New Call" placeholder -
+   * lwpDialpad.dial() checks isAttendedTransferPending() the same way it
+   * already does isInTransfer() for blind transfer(), and routes digits
+   * typed while this call is still focused into its own target buffer
+   * instead of sending them as DTMF into this (held, silent) call. No-ops
+   * if there's no session, this is already in a conference, or a transfer
+   * is already pending.
+   */
+  attendedTransferStart(autoHold = true) {
+    if (
+      !this.hasSession() ||
+      this.isInConference() ||
+      this.isAttendedTransferPending()
+    ) {
+      return false;
+    }
+
+    this._attendedTransferPending = true;
+
+    if (autoHold) {
+      this.hold();
+    }
+
+    this._emit("transfer.attended.collecting", this);
+
+    return true;
+  }
+
+  /**
+   * Aborts an attendedTransferStart() still waiting on a consultation call
+   * (e.g. the user changed their mind before dialing one), unholding this
+   * call again. No-ops once a consultation call already exists - at that
+   * point completing or abandoning the transfer is the consultation call's
+   * own hangup()/attendedTransfer() to decide, not this one's.
+   */
+  attendedTransferCancel(autoUnhold = true) {
+    if (!this.isAttendedTransferPending()) {
+      return false;
+    }
+
+    this._attendedTransferPending = false;
+
+    if (autoUnhold) {
+      this.unhold();
+    }
+
+    this._emit("transfer.attended.cancelled", this);
+
+    return true;
+  }
+
+  /**
+   * Completes an attended (consultative) transfer: bridges this call
+   * (typically the original, held party) directly to targetCall (typically
+   * the established consultation call) via a REFER carrying a Replaces
+   * header for targetCall's dialog - RFC 3891 - rather than the plain
+   * REFER blind transfer() uses. Once the referred party reaches
+   * targetCall's far end and that dialog is actually replaced, both legs
+   * on our side are superfluous and are hung up locally, mirroring how
+   * transfer() releases itself once a blind transfer connects.
+   */
+  attendedTransfer(targetCall) {
+    if (!this.hasSession() || !targetCall || !targetCall.hasSession()) {
+      return false;
+    }
+
+    const target = targetCall.remoteIdentity(true).uri.toString();
+    const referSubscriber = this._getSession().refer(target, {
+      replaces: targetCall._getSession(),
+    });
+
+    if (!referSubscriber) {
+      this._emit("transfer.failed", this, targetCall);
+      return false;
+    }
+
+    referSubscriber.on("accepted", () => {
+      // Both legs are about to be hung up below, but clear this explicitly
+      // rather than relying on that - lwpCallControl's own cleanup (see its
+      // "call.terminated" binding) checks isAttendedTransferPending() to
+      // tell a completed transfer apart from a consultation call that died
+      // before completing, and both hangups here race that same check.
+      this._attendedTransferPending = false;
+
+      this._emit("transfer.confirmed", this, targetCall);
+      this.hangup();
+      targetCall.hangup();
+    });
+
+    referSubscriber.on("failed", () => {
+      this._emit("transfer.failed", this, targetCall);
+    });
+
+    referSubscriber.on("requestFailed", () => {
+      this._emit("transfer.failed", this, targetCall);
+    });
+
+    this._emit("transfer.started", this, targetCall);
+
+    return true;
+  }
+
+  /**
+   * Downgrades a still-in-progress attended transfer to a blind one:
+   * REFERs this call (the origin) directly to consultCall's target, the
+   * same plain REFER transfer(target) always sends - no Replaces, and no
+   * need for consultCall to have been answered first. Useful when whoever
+   * was being consulted doesn't actually need to be spoken to. consultCall
+   * is no longer needed either way (whether still ringing or already
+   * answered) and is terminated as part of this.
+   */
+  transferToBlind(consultCall) {
+    if (!this.hasSession() || !consultCall || !consultCall.hasSession()) {
+      return false;
+    }
+
+    const target = consultCall.remoteIdentity(true).uri.toString();
+
+    this.transfer(target);
+
+    this._attendedTransferPending = false;
+    consultCall._attendedTransferOrigin = null;
+    consultCall.terminate();
+
+    return true;
+  }
+
   answer() {
     if (this.hasSession()) {
       const mediaDevices = this._libwebphone.getMediaDevices();
@@ -677,6 +819,8 @@ export default class {
     this._primary = false;
 
     this._inTransfer = false;
+
+    this._attendedTransferPending = false;
 
     this._conferenceActive = false;
 
