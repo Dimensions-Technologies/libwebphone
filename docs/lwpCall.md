@@ -156,6 +156,20 @@ Returns:
 | ------- | ---------------------------------------------------------------------- |
 | boolean | True when the instance represents a call in the process of transfering |
 
+#### isAttendedTransferPending()
+
+Returns:
+
+| Type    | Description                                                                                        |
+| ------- | --------------------------------------------------------------------------------------------------- |
+| boolean | True from attendedTransferStart() until either attendedTransfer() completes it or attendedTransferCancel() aborts it |
+
+Unlike isInTransfer(), this is deliberately **not** cleared by losing
+primary/focus - the expected next step (placing the consultation call,
+which then takes over primary) does exactly that, and the flag needs to
+survive it. See [lwpCallControl](lwpCallControl.md).transferAttended() for
+the higher-level action that drives this end to end.
+
 #### getDirection()
 
 Returns:
@@ -364,6 +378,89 @@ If the target is not appropriate for the transfer, it will throw an
 [INVALID_TARGET_ERROR](https://jssip.net/documentation/3.4.x/api/dom_exceptions/)
 error.
 
+#### attendedTransferStart(autoHold)
+
+| Name     | Type    | Default | Description                                          |
+| -------- | ------- | ------- | ----------------------------------------------------- |
+| autoHold | boolean | true    | Whether to hold the call as part of marking it pending |
+
+Marks this call as the origin of an attended transfer
+(isAttendedTransferPending() becomes true) and, if autoHold, holds it. From
+this point [lwpDialpad](lwpDialpad.md).dial() routes typed digits into its
+own target buffer instead of sending them as DTMF into this (held) call,
+the same way it already does for isInTransfer(). No-ops (returns false) if
+there's no session, the call is already in a conference, or a transfer is
+already pending.
+
+#### attendedTransferCancel(autoUnhold)
+
+| Name       | Type    | Default | Description                                     |
+| ---------- | ------- | ------- | ------------------------------------------------- |
+| autoUnhold | boolean | true    | Whether to unhold the call as part of cancelling |
+
+Aborts an attendedTransferStart() that's still waiting on a consultation
+call, clearing isAttendedTransferPending() and, if autoUnhold, unholding
+the call again. No-ops (returns false) if no transfer is pending.
+
+#### attendedTransfer(targetCall)
+
+| Name       | Type    | Default | Description                                                     |
+| ---------- | ------- | ------- | ----------------------------------------------------------------- |
+| targetCall | lwpCall | -       | The established call whose far end this call should be bridged to |
+
+Completes an attended (consultative) transfer: bridges this call directly to
+targetCall's far end and drops this end entirely, rather than plain
+transfer()'s "send the far end wherever this dialpad target says." This is
+typically called on the original, held party (this) with targetCall being
+the established consultation call reached separately (e.g. via
+lwpUserAgent.call() while this call is held) - see
+[lwpCallControl](lwpCallControl.md).transferAttended() for the higher-level
+action that finds that pairing automatically. Both calls must already have a
+session; no-ops otherwise.
+
+Unlike transfer(), which sends a plain REFER to the far end with the raw
+dialed target, this sends a REFER on this call's dialog carrying a Replaces
+header (RFC 3891) built from targetCall's dialog - so the referred-to party
+reconnects directly into targetCall's existing dialog with its far end
+instead of placing a fresh call. As with transfer(), a successful REFER
+response (`transfer.started`) only means the request was accepted for
+processing; the actual outcome is only known once the far end's NOTIFY
+arrives:
+
+- If the NOTIFY reports success, both this call and targetCall are hung up
+  automatically (this end is no longer needed once the other two parties are
+  bridged directly) and `transfer.confirmed` is emitted.
+- If the NOTIFY reports failure, or the REFER request itself is rejected,
+  `transfer.failed` is emitted and neither call is touched further - both
+  remain exactly as they were (this call held, targetCall established), so
+  the transfer can be retried.
+
+Throws:
+
+If the target derived from targetCall's remote identity is not appropriate
+for the transfer, it will throw an
+[INVALID_TARGET_ERROR](https://jssip.net/documentation/3.4.x/api/dom_exceptions/)
+error.
+
+#### transferToBlind(consultCall)
+
+| Name       | Type    | Default | Description                                                        |
+| ---------- | ------- | ------- | ------------------------------------------------------------------- |
+| consultCall | lwpCall | -      | The in-progress (ringing or established) consultation call to downgrade |
+
+Downgrades a still-in-progress attended transfer to a blind one: calls
+transfer(target) on this call using consultCall's own remote identity as
+the target, the same plain REFER (no Replaces) transfer() always sends -
+unlike attendedTransfer(), consultCall does **not** need to have been
+answered first, since a plain REFER's Refer-To only needs a URI, not a
+confirmed dialog to reference. Useful when whoever's being consulted
+doesn't actually need to be spoken to. consultCall is no longer needed
+either way and is terminated as part of this (via terminate(), so it's
+handled correctly whether it's still ringing or has since been answered).
+See [lwpCallControl](lwpCallControl.md).transferAttendedToBlind() for the
+higher-level action that finds this pairing automatically. Both calls must
+already have a session; no-ops otherwise.
+
 #### answer()
 
 If the instance has a session, invokes the jssip answer method described by
@@ -514,10 +611,12 @@ takes priority over the top-level config for that call only.
 | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | call.created                       |                                                                                                                            | Emitted when the class is instantiated                                                                                                                                                                                                                                                                      |
 | call.transfer.collecting           |                                                                                                                            | Emitted when the call begins collecting the transfer target from lwpDialpad                                                                                                                                                                                                                                 |
-| call.transfer.started              | target (string)                                                                                                            | Emitted after succesfully sending a SIP REFER (to transfer the call to the target)                                                                                                                                                                                                                          |
-| call.transfer.failed               | target (string)                                                                                                            | Emitted when no target was collected, the REFER request itself was rejected, or the far end's NOTIFY reports the referred-to call failed                                                                                                                                                                    |
-| call.transfer.complete             | target (string)                                                                                                            | Emitted once the transfer() call itself has finished running (i.e. the REFER was sent, or sending it failed) - not a statement about whether the transfer ultimately succeeds, see transfer.confirmed for that                                                                                             |
-| call.transfer.confirmed            | target (string)                                                                                                            | Emitted when the far end's NOTIFY confirms the referred-to call was answered; this call then hangs up automatically, same as a desk phone releasing itself once a blind transfer connects                                                                                                                  |
+| call.transfer.attended.collecting  |                                                                                                                            | Emitted by attendedTransferStart() when the call is marked as an attended transfer's origin                                                                                                                                                                                                                 |
+| call.transfer.attended.cancelled   |                                                                                                                            | Emitted by attendedTransferCancel() when a pending attended transfer is aborted before a consultation call existed                                                                                                                                                                                          |
+| call.transfer.started              | target (string or lwpCall)                                                                                                | Emitted after succesfully sending a SIP REFER (to transfer the call to the target). target is the dialed string for transfer(), or the lwpCall being bridged to for attendedTransfer()                                                                                                                     |
+| call.transfer.failed               | target (string or lwpCall)                                                                                                | Emitted when no target was collected, the REFER request itself was rejected, or the far end's NOTIFY reports the referred-to call failed                                                                                                                                                                    |
+| call.transfer.complete             | target (string or lwpCall)                                                                                                | Emitted once the transfer() call itself has finished running (i.e. the REFER was sent, or sending it failed) - not a statement about whether the transfer ultimately succeeds, see transfer.confirmed for that. Not emitted by attendedTransfer()                                                          |
+| call.transfer.confirmed            | target (string or lwpCall)                                                                                                | Emitted when the far end's NOTIFY confirms the referred-to call was answered; for transfer() this call then hangs up automatically, for attendedTransfer() both this call and targetCall hang up automatically, same as a desk phone releasing itself once a transfer connects                            |
 | call.answered                      |                                                                                                                            | Emitted when the call has been successfully answered                                                                                                                                                                                                                                                        |
 | call.rejected                      |                                                                                                                            | Emitted when a terminating call has been successfully rejected (requires developers to use the lwpCall.reject() function)                                                                                                                                                                                   |
 | call.renegotiated                  |                                                                                                                            | Emitted when the call has been successully renegotiated                                                                                                                                                                                                                                                     |

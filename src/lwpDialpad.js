@@ -31,7 +31,7 @@ export default class extends lwpRenderer {
       this._emit("tones.play", this, tones);
     }
 
-    if (call && !call.isInTransfer()) {
+    if (call && !call.isInTransfer() && !call.isAttendedTransferPending()) {
       call.sendDTMF(char);
     } else {
       this._target.push(char);
@@ -211,6 +211,14 @@ export default class extends lwpRenderer {
     }
   }
 
+  _attendedTransferAction() {
+    const callControl = this._libwebphone.getCallControl();
+
+    if (callControl) {
+      callControl.transferAttended();
+    }
+  }
+
   terminate() {
     const call = this._getCall();
 
@@ -243,6 +251,9 @@ export default class extends lwpRenderer {
       case "transfer":
         if (options.transfer) this.transfer();
         break;
+      case "attendedTransfer":
+        if (options.transfer) this._attendedTransferAction();
+        break;
       case "terminate":
         if (options.terminate) this.terminate();
         break;
@@ -259,6 +270,8 @@ export default class extends lwpRenderer {
       return "call";
     } else if (call.isInTransfer()) {
       return "transfer";
+    } else if (call.isAttendedTransferPending()) {
+      return "attendedTransfer";
     } else {
       if (call.getDirection() == "terminating" && !call.isEstablished()) {
         return "answer";
@@ -820,7 +833,7 @@ export default class extends lwpRenderer {
       this._emit("tones.play", this, tones);
     }
 
-    if (call && !call.isInTransfer()) {
+    if (call && !call.isInTransfer() && !call.isAttendedTransferPending()) {
       call.sendDTMF(event.data);
     } else {
       this._target = element.value.split("");

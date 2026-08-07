@@ -62,6 +62,53 @@ Unmutes video being transmitted on the primary call.
 
 Starts or completes a started transfer on the primary call.
 
+#### transferAttended()
+
+Drives an attended (consultative) transfer on the primary call through up
+to three clicks, without ever needing to manually switch to "New Call" in
+[lwpCallList](lwpCallList.md):
+
+1. **Nothing pending yet** - holds the primary call and marks it as the
+   transfer's origin via [lwpCall](lwpCall.md).attendedTransferStart().
+   From this point, digits typed into [lwpDialpad](lwpDialpad.md) are
+   collected as a dial target instead of being sent as DTMF into the
+   (held) call - the same routing blind transfer's collecting state
+   already relies on. The button label switches to "Attended Transfer"
+   (shown while idle) -> stays as-is here since nothing's been typed yet.
+2. **Pending, no consultation call yet** - places a call to whatever's
+   been typed into the dialpad. Because the origin call is already held,
+   [lwpCallList](lwpCallList.md).addCall() automatically promotes the new
+   call to primary, so it becomes the "current call" for this same button
+   without the user switching focus themselves. The button label switches
+   to "Call" while waiting for digits. Clicked with nothing typed, this
+   instead cancels back to step 1 (unholds the origin call, clears the
+   pending flag) - the same empty-target-means-abort convention transfer()
+   uses.
+3. **Consultation call established** - with exactly one other held,
+   non-conference call now found (the origin), pressing it again completes
+   the transfer: the origin call is bridged directly to the consultation
+   call's far end via a SIP REFER carrying a Replaces header (RFC 3891),
+   and both of this end's legs are hung up once the far end confirms. The
+   button label switches to "Transfer (complete)" once ready.
+
+If the consultation call placed in step 2 ends before the transfer
+completes - cancelled while ringing, rejected, hung up, or failed to
+connect - the origin call's pending transfer is abandoned automatically
+(unheld, pending flag cleared), rather than being left stuck showing "Call"
+indefinitely with no consultation call left to place it against.
+
+#### transferAttendedToBlind()
+
+Downgrades an in-progress attended transfer to a blind one: while the
+consultation call placed by transferAttended() is primary - ringing or
+already established, either works - completes the transfer immediately via
+[lwpCall](lwpCall.md).transferToBlind() instead of waiting for/needing it
+to be answered and consulted with first. The origin call REFERs directly to
+whoever's being consulted, and the (no longer needed) consultation call is
+terminated as part of this. Shown as a "Complete as Blind Transfer" button
+alongside the primary call's other controls whenever it's a pending
+attended transfer's consultation call; no-ops otherwise.
+
 #### conference()
 
 Merges the primary call with the single eligible held call into a local,
@@ -128,6 +175,8 @@ Re-paint / update all render targets.
 | unmuteVideo      | Unmute Video        | Used as the text for the unmute video action            |
 | transferblind    | Blind Transfer      | Used as the text for the start blind transfer action    |
 | transferattended | Attended Transfer   | Used as the text for the start attended transfer action |
+| transferattendedcall | Call            | Used as the text for placing an attended transfer's consultation call, once digits have been dialed |
+| transferattendedasblind | Complete as Blind Transfer | Used as the text for transferAttendedToBlind()'s button |
 | transfercomplete | Transfer (complete) | Used as the text for the complete transfer action       |
 | conference       | Conference          | Used as the text for the start-conference action (shown when not yet in a conference) |
 | addtoconference  | Add to Conference   | Used as the text for the conference() button once already in a conference |
@@ -163,7 +212,10 @@ Re-paint / update all render targets.
 | call.primary.unmuted             | Invokes updateRenders() to show call controls relevant to the new call state   |
 | call.primary.transfer.collecting | Invokes updateRenders() to show call controls relevant to the new call state   |
 | call.primary.transfer.complete   | Invokes updateRenders() to show call controls relevant to the new call state   |
+| call.primary.transfer.attended.collecting | Invokes updateRenders() to switch the attended transfer button to its "Call" label |
+| call.primary.transfer.attended.cancelled  | Invokes updateRenders() to restore the attended transfer button to its idle label |
 | call.primary.terminated          | Invokes updateRenders() to show call controls relevant to the new call state   |
+| call.terminated                  | If the terminated call was a pending attended transfer's consultation call (see transferAttended()), cancels that transfer on its origin call |
 | conference.started               | Invokes updateRenders() to show split/holdConference, hide transfer, and switch the conference() button label to "Add to Conference" |
 | conference.split                 | Invokes updateRenders() to show transfer, hide split/holdConference, and restore the "Conference" button label |
 | conference.ended                 | Invokes updateRenders() to show transfer, hide split/endConference/holdConference, and restore the "Conference" button label |

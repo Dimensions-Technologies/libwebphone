@@ -21,9 +21,12 @@ letters to numbers as they would map on a standard dialpad.
 | char  | character or integer         |         | The dialed character                                                                                                                                          |
 | tones | array of integers or boolean | true    | If true, and the char has a corresponding tone in the configuration play that tone. If false, don't play any tones. If an array use that as the tones to play |
 
-Add a character to the end of the target if there is no primary call or the
-primary call is preforming a transfer. Otherwise the char is sent as DTMF on the
-active call and not added to the target.
+Add a character to the end of the target if there is no primary call, or the
+primary call is collecting a blind transfer target (isInTransfer()), or an
+attended transfer is pending on it
+([lwpCall](lwpCall.md).isAttendedTransferPending() - see
+[lwpCallControl](lwpCallControl.md).transferAttended()). Otherwise the char
+is sent as DTMF on the active call and not added to the target.
 
 #### backspace()
 
@@ -138,16 +141,24 @@ redial.
 If there is no primary call and the target has one or more elemenets the action
 will be to call.
 
-If the primary call is in a transfer the action will be to transfer.
+If the primary call is in a (blind) transfer the action will be to transfer.
+
+If the primary call has a pending attended transfer
+([lwpCall](lwpCall.md).isAttendedTransferPending()) the action will be
+attendedTransfer - delegating to
+[lwpCallControl](lwpCallControl.md).transferAttended(), which places the
+consultation call if digits have been typed, or cancels the pending
+transfer if not (options.transfer gates this the same way it gates the
+plain transfer action).
 
 If the primary call is not established and its direction is terminating the
 action will be to answer.
 
 Any other condition will be to terminate.
 
-| Type   | Description                                                                              |
-| ------ | ---------------------------------------------------------------------------------------- |
-| string | The autoAction to take on the primary call (redial, call, transfer, answer or terminate) |
+| Type   | Description                                                                                                    |
+| ------ | ----------------------------------------------------------------------------------------------------------------- |
+| string | The autoAction to take on the primary call (redial, call, transfer, attendedTransfer, answer or terminate) |
 
 #### updateRenders()
 
