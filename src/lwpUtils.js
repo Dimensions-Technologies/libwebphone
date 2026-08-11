@@ -86,6 +86,77 @@ export default class {
     return ["audio", "video"];
   }
 
+  // Mutes a playing media element, then pauses it `delayMs` later. pause()
+  // cuts the waveform wherever it happens to be, which clicks unless that's
+  // near a zero crossing; muting first gives the element time to render
+  // near-silent audio before the cut. Best-effort - the margin has to exceed
+  // however much audio is already buffered ahead, which JS can't observe.
+  //
+  // Muted rather than volume = 0 so it can't collide with anything else
+  // writing volume during the window (lwpCall.changeVolume()).
+  //
+  // Safe to call again before a previous call finishes - the token
+  // invalidates any pending pause, so a stale one can't land on playback
+  // that's since moved on.
+  static declickPause(element, delayMs = 50) {
+    if (!element || element.paused) {
+      return;
+    }
+
+    element._lwpDeclickToken = (element._lwpDeclickToken || 0) + 1;
+    const token = element._lwpDeclickToken;
+
+    element._lwpDeclickPending = true;
+    element.muted = true;
+
+    setTimeout(() => {
+      if (element._lwpDeclickToken !== token) {
+        return;
+      }
+
+      element.pause();
+      element.muted = false;
+      element._lwpDeclickPending = false;
+    }, delayMs);
+  }
+
+  // Invalidates any pending declickPause() (e.g. the element is about to be
+  // reused) and unmutes immediately rather than leaving it silent until the
+  // pending pause would have landed.
+  static cancelDeclickPause(element) {
+    if (!element) {
+      return;
+    }
+
+    element._lwpDeclickToken = (element._lwpDeclickToken || 0) + 1;
+
+    // Only unmute a mute we're responsible for, not one a host app set.
+    if (element._lwpDeclickPending) {
+      element._lwpDeclickPending = false;
+      element.muted = false;
+    }
+  }
+
+  // Decodes a `data:` URI's base64 payload into an ArrayBuffer for
+  // decodeAudioData(). Not fetch(dataUri).arrayBuffer(), which is shorter but
+  // can be blocked by a host application's `connect-src` CSP; atob() can't.
+  static dataUriToArrayBuffer(dataUri) {
+    const base64 = String(dataUri).split(",")[1];
+
+    if (!base64) {
+      throw new Error("lwpUtils.dataUriToArrayBuffer: not a data URI");
+    }
+
+    const binary = window.atob(base64);
+    const bytes = new Uint8Array(binary.length);
+
+    for (let index = 0; index < binary.length; index++) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+
+    return bytes.buffer;
+  }
+
   static isChrome() {
     const isChromium = window.chrome;
     const winNav = window.navigator;

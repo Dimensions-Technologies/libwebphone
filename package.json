@@ -8,7 +8,8 @@
     "watch": "SET NODE_OPTIONS=--openssl-legacy-provider && webpack --config configuration/development/webpack.config.js --watch",
     "stats": "SET NODE_OPTIONS=--openssl-legacy-provider && webpack --json > stats.json",
     "build": "SET NODE_OPTIONS=--openssl-legacy-provider && webpack --config configuration/production/webpack.config.js",
-    "lint": "npx eslint src/*"
+    "lint": "npx eslint src/*",
+    "ringtones:build": "node scripts/generate-ringtones.js"
   },
   "repository": {
     "type": "git",
