@@ -85,7 +85,7 @@ Get the HTML media element linked to the provided device kind.
 
 | Name       | Type   | Default | Description                                                                            |
 | ---------- | ------ | ------- | -------------------------------------------------------------------------------------- |
-| deviceKind | string |         | The device kind linked to the HTML media element (ringoutput, audiooutput, audioinput, videoinput) |
+| deviceKind | string |         | The device kind linked to the HTML media element (ringoutput, ringoutput2, audiooutput, audioinput, videoinput) |
 
 Returns:
 
@@ -99,7 +99,7 @@ Get the prefered device for the given device kind.
 
 | Name       | Type   | Default | Description                                                   |
 | ---------- | ------ | ------- | ------------------------------------------------------------- |
-| deviceKind | string |         | The device kind to get (ringoutput, audiooutput, audioinput, videoinput) |
+| deviceKind | string |         | The device kind to get (ringoutput, ringoutput2, audiooutput, audioinput, videoinput) |
 
 Returns:
 
@@ -113,8 +113,19 @@ For the provided device kind attmpet to switch to the provided device id, updati
 
 | Name       | Type   | Default | Description                                                     |
 | ---------- | ------ | ------- | --------------------------------------------------------------- |
-| deviceKind | string |         | The device kind to switch (ringoutput, audiooutput, audioinput, videoinput) |
+| deviceKind | string |         | The device kind to switch (ringoutput, ringoutput2, audiooutput, audioinput, videoinput) |
 | deviceId   | string |         | The device id to switch to                                      |
+
+> `ringoutput2` is an optional **second** device that rings alongside `ringoutput`
+> (see
+> [Secondary ring output](/docs/lwpAudioContext.md#secondary-ring-output)). It is
+> `"none"` until a device is chosen for it, and `"none"` is always available to
+> switch back to. The two ring outputs must be different devices: the device
+> `ringoutput` is currently using is left out of the `ringoutput2` list entirely,
+> and asking for it anyway rejects with an Error and emits
+> `mediaDevices.ring.output.secondary.error`. Moving `ringoutput` *onto* whatever
+> `ringoutput2` is using is allowed - the secondary gives way and resets itself to
+> `"none"`.
 
 > For `ringoutput` there are two places the device can be set, and this picks the
 > right one: where the AudioContext owns its own sink (Chrome/Edge 110+, see
@@ -124,9 +135,12 @@ For the provided device kind attmpet to switch to the provided device id, updati
 > emitted) once the sink has actually moved, so a `setSinkId()` that fails leaves
 > the selection showing the device still in use.
 
-> Where a browser implements `setSinkId()` in neither place - Safari - output
-> device selection is inert: the selection is recorded and announced, but audio
-> continues to the system default device.
+> Where a browser implements `setSinkId()` in neither place - Android, and Safari
+> before 18.4 - output device selection is inert: the selection is recorded and
+> announced, but audio continues to the system default device. `ringoutput2` is
+> the exception: with nowhere to point a second device it stays silent rather
+> than doubling the ring onto the default device, and `ringoutput2.enabled` is
+> `false` there anyway.
 
 #### refreshAvailableDevices()
 
@@ -141,7 +155,8 @@ Re-paint / update all render targets.
 | Key         | Default (en)             | Description                                                                          |
 | ----------- | ------------------------ | ------------------------------------------------------------------------------------ |
 | none        | None                     | Used as the text for a 'null' selection that can be used to disable that device kind |
-| ringoutput  | Speaker                  | Used to label the selector for the ring audio output device                          |
+| ringoutput  | Ringing Device           | Used to label the selector for the ring audio output device                          |
+| ringoutput2 | Secondary Ringing Device | Used to label the selector for the optional second ring audio output device          |
 | audiooutput | Speaker                  | Used to label the selector for the audio output device                               |
 | audioinput  | Microphone               | Used to label the selector for the audio input device                                |
 | videoinput  | Camera                   | Used to lable the selector for the video input device                                |
@@ -158,6 +173,13 @@ Re-paint / update all render targets.
 | ringoutput.mediaElement.elementId      | string                                                                                            |                                    | The HTML id of an existing HTMLMediaElement to use                                                                                                                                                                                                      |
 | ringoutput.mediaElement.element        | HTMLMediaElement                                                                                  |                                    | The HTMLMediaElement linked to the output device selection                                                                                                                                                                                              |
 | ringoutput.mediaElement.initParameters | object                                                                                            | { muted: false }                   | Key - value pairs to apply to the HTMLMediaElement                                                                                                                                                                                                      |
+| ringoutput2.enabled                     | boolean                                                                                           | true if sinkId in HtmlMediaElement | Enables secondary ringing output device selection                                                                                                                                                                                                       |
+| ringoutput2.show                        | boolean                                                                                           | true                               | Should the default template show the secondary ringing output device selection                                                                                                                                                                          |
+| ringoutput2.preferedDeviceIds           | array of strings                                                                                  | []                                 | The prefered device ids in order of precedence. Empty means the secondary ring output starts as `none`, and unlike the other kinds it is never auto-promoted onto a newly connected device - it only falls back to `none` when its device disconnects     |
+| ringoutput2.mediaElement.create         | boolean                                                                                           | true                               | Should a HTMLMediaElement be created                                                                                                                                                                                                                    |
+| ringoutput2.mediaElement.elementId      | string                                                                                            |                                    | The HTML id of an existing HTMLMediaElement to use                                                                                                                                                                                                      |
+| ringoutput2.mediaElement.element        | HTMLMediaElement                                                                                  |                                    | The HTMLMediaElement linked to the secondary ring output device selection                                                                                                                                                                               |
+| ringoutput2.mediaElement.initParameters | object                                                                                            | { muted: false }                   | Key - value pairs to apply to the HTMLMediaElement                                                                                                                                                                                                      |
 | audiooutput.enabled                     | boolean                                                                                           | true if sinkId in HtmlMediaElement | Enables audio output device selection                                                                                                                                                                                                                   |
 | audiooutput.show                        | boolean                                                                                           | true                               | Should the default template show the output device selection                                                                                                                                                                                            |
 | audiooutput.preferedDeviceIds           | array of strings                                                                                  | []                                 | The prefered device ids in order of precedence                                                                                                                                                                                                          |
@@ -195,15 +217,18 @@ Re-paint / update all render targets.
 | mediaDevices.streams.started      | [mediaStream](https://developer.mozilla.org/en-US/docs/Web/API/MediaStream)           | Emitted when streams are started for a call     |
 | mediaDevices.streams.stopped      |                                                                                       | Emitted when streams are stopped for a call     |
 | mediaDevices.ring.output.element | [HTML Audio Element](https://developer.mozilla.org/en-US/docs/Web/HTML/Element/audio) | Emitted when the HTML audio element is created  |
+| mediaDevices.ring.output.secondary.element | [HTML Audio Element](https://developer.mozilla.org/en-US/docs/Web/HTML/Element/audio) | Emitted when the HTML audio element is created  |
 | mediaDevices.audio.output.element | [HTML Audio Element](https://developer.mozilla.org/en-US/docs/Web/HTML/Element/audio) | Emitted when the HTML audio element is created  |
 | mediaDevices.audio.input.element  | [HTML Audio Element](https://developer.mozilla.org/en-US/docs/Web/HTML/Element/audio) | Emitted when the HTML audio element is created  |
 | mediaDevices.video.output.element | [HTML Video Element](https://developer.mozilla.org/en-US/docs/Web/HTML/Element/video) | Emitted when the HTML audio element is created  |
 | mediaDevices.getUserMedia.error   | error (exception)                                                                     | Emitted if getUserMedia() throws                |
 | mediaDevices.ring.output.changed | preferedDevice                                                                        | Emitted when the ring output audio device is changed |
 | mediaDevices.ring.output.error   | error                                                                                  | Emitted when setSinkId() fails while switching the ring output device, whether it was called on the AudioContext or on the media element |
+| mediaDevices.ring.output.secondary.changed | preferedDevice                                                              | Emitted when the secondary ring output device is changed, including when it is set (or reset) back to `none` |
+| mediaDevices.ring.output.secondary.error | error                                                                         | Emitted when setSinkId() fails while switching the secondary ring output device, or when a change is refused because the requested device is already the primary ring output |
 | mediaDevices.audio.output.changed | preferedDevice                                                                        | Emitted when the output audio device is changed |
 | mediaDevices.audio.output.error  | error (exception)                                                                     | Emitted when setSinkId() fails while switching the audio output device |
-| mediaDevices.{kind}.play.error   | element, error                                                                        | Emitted when `_startMediaElements()` cannot start a media element, usually the browser withholding playback until a user gesture. `{kind}` is one of `ring.output`, `audio.output`, `audio.input` or `video.input` (e.g. `mediaDevices.ring.output.play.error`). Left unhandled this failed invisibly, which matters because in element mode lwpAudioContext routes ringtones through the ring output element - a blocked output element means a silent ring. The ring output element is skipped entirely where the AudioContext owns its own sink, since nothing is attached to it there |
+| mediaDevices.{kind}.play.error   | element, error                                                                        | Emitted when `_startMediaElements()` cannot start a media element, usually the browser withholding playback until a user gesture. `{kind}` is one of `ring.output`, `ring.output.secondary`, `audio.output`, `audio.input` or `video.input` (e.g. `mediaDevices.ring.output.play.error`). Left unhandled this failed invisibly, which matters because in element mode lwpAudioContext routes ringtones through the ring output element - a blocked output element means a silent ring. The ring output element is skipped entirely where the AudioContext owns its own sink, since nothing is attached to it there |
 | mediaDevices.audio.input.muted    | trackParameters (lwpUtil.trackParameters)                                             | Emitted when the input audio is muted           |
 | mediaDevices.video.input.muted    | trackParameters (lwpUtil.trackParameters)                                             | Emitted when the input audio is muted           |
 | mediaDevices.audio.input.unmuted  | trackParameters (lwpUtil.trackParameters)                                             | Emitted when the input audio is unmuted         |
@@ -229,6 +254,7 @@ Re-paint / update all render targets.
 | mediaDevices.streams.started          | Invokes updateRenders()        |
 | mediaDevices.streams.stop             | Invokes updateRenders()        |
 | mediaDevices.ring.output.changed      | Invokes updateRenders()        |
+| mediaDevices.ring.output.secondary.changed | Invokes updateRenders()   |
 | mediaDevices.audio.output.changed     | Invokes updateRenders()        |
 | mediaDevices.audio.input.changed      | Invokes updateRenders()        |
 | mediaDevices.video.input.changed      | Invokes updateRenders()        |

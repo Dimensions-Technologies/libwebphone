@@ -55,6 +55,9 @@
                     "ringoutput": {
                         "show": false
                     },
+                    "ringoutput2": {
+                        "show": false
+                    },
                     "audiooutput": {
                         "show": false
                     },
