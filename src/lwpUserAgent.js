@@ -336,6 +336,11 @@ export default class extends lwpRenderer {
                 contact_uri: {}
             },
             debug: false,
+            debug_ignored_events: [
+                "timeupdate",
+                "render.rendered",
+                "durationchange"
+            ]
         };
 
         this._config = lwpUtils.merge(defaults, config);
@@ -395,7 +400,7 @@ export default class extends lwpRenderer {
             this.updateRenders();
         });
         this._libwebphone.onAny((event, ...data) => {
-            if (this.isDebugging()) {
+            if (this.isDebugging() && !this._isDebugIgnoredEvent(event)) {
                 console.log(event, data);
             }
         });
@@ -575,6 +580,18 @@ export default class extends lwpRenderer {
     }
 
     /** Helper functions */
+
+    _isDebugIgnoredEvent(event) {
+        const ignored = this._config.debug_ignored_events;
+
+        if (typeof event != "string" || !Array.isArray(ignored)) {
+            return false;
+        }
+
+        return ignored.some((pattern) => {
+            return event == pattern || event.endsWith("." + pattern);
+        });
+    }
 
     _call(target, options) {
         try {
