@@ -47,6 +47,10 @@ Configures the instance to start logging debug information on the console. This
 will include all libwebphone events and their payloads as well as jssip
 debugging (which includes the SIP packets).
 
+Events named in the `debug_ignored_events` configuration are excluded from the
+console output. They are still emitted normally, so anything listening for them
+is unaffected.
+
 #### stopDebug()
 
 Configures the instance to stop logging debug information on the console.
@@ -197,6 +201,7 @@ Re-paint / update all render targets.
 | user_agent.custom_headers.register               | array                                                                                                    | []                   | A list of strings to add to every REGISTER request |
 | user_agent.custom_parameters.contact_uri            | object                                                                                                    | []                   | Object with keys representing the header param name and values representing the Contact header param values. |
 | debug                           | boolean                                                                                                   | false                  | The inital value for the debugging option                                                                                                                                                                                                                                                            |
+| debug_ignored_events            | array                                                                                                     | ["timeupdate"]         | Events debug mode will not log to the console. Each entry matches either a whole event name or its last dot delimited segment, so "timeupdate" covers both mediaDevices.audio.output.timeupdate and call.primary.timeupdate. The events are still emitted, only the logging is suppressed.             |
 | renderTargets                   | array                                                                                                     | []                     | See [lwpRenderer](lwpRenderer.md)                                                                                                                                                                                                                                                                    |
 
 ## Events
