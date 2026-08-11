@@ -901,7 +901,20 @@ export default class {
   }
 
   _initEventBindings() {
-    this._libwebphone.on(
+    this._libwebphoneEventBindings = [];
+    this._documentEventBindings = [];
+
+    const bind = (event, handler) => {
+      this._libwebphoneEventBindings.push({ event, handler });
+      this._libwebphone.on(event, handler);
+    };
+
+    const bindDocument = (event, handler) => {
+      this._documentEventBindings.push({ event, handler });
+      document.addEventListener(event, handler);
+    };
+
+    bind(
       "mediaDevices.audio.input.changed",
       (lwp, mediaDevices, newTrack) => {
         // While in a conference the sender carries the mixed output, not a
@@ -916,7 +929,7 @@ export default class {
         }
       }
     );
-    this._libwebphone.on(
+    bind(
       "mediaDevices.video.input.changed",
       (lwp, mediaDevices, newTrack) => {
         if (this.hasSession() && newTrack) {
@@ -924,7 +937,7 @@ export default class {
         }
       }
     );
-    this._libwebphone.on(
+    bind(
       "mediaDevices.audio.output.changed",
       (lwp, mediaDevices, preferedDevice) => {
         Object.keys(this._streams.remote.elements).forEach((kind) => {
@@ -944,10 +957,10 @@ export default class {
       }
     );
 
-    this._libwebphone.on("audioContext.channel.master.volume", () => {
+    bind("audioContext.channel.master.volume", () => {
       this.changeVolume();
     });
-    this._libwebphone.on("audioContext.channel.remote.volume", () => {
+    bind("audioContext.channel.remote.volume", () => {
       this.changeVolume();
     });
 
@@ -1046,7 +1059,7 @@ export default class {
       });
 
       if (this._config.globalKeyShortcuts) {
-        document.addEventListener("keydown", (event) => {
+        bindDocument("keydown", (event) => {
           if (
             event.target != document.body ||
             event.repeat ||
@@ -1063,7 +1076,7 @@ export default class {
               break;
           }
         });
-        document.addEventListener("keyup", (event) => {
+        bindDocument("keyup", (event) => {
           if (
             event.target != document.body ||
             event.repeat ||
@@ -1117,7 +1130,21 @@ export default class {
 
     this._destroyStreams();
 
+    this._destroyEventBindings();
+
     this._session = null;
+  }
+
+  _destroyEventBindings() {
+    (this._libwebphoneEventBindings || []).forEach(({ event, handler }) => {
+      this._libwebphone.off(event, handler);
+    });
+    this._libwebphoneEventBindings = [];
+
+    (this._documentEventBindings || []).forEach(({ event, handler }) => {
+      document.removeEventListener(event, handler);
+    });
+    this._documentEventBindings = [];
   }
 
   _getSession() {
