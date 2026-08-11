@@ -37,6 +37,9 @@ Which mode is active can be read at runtime with
 | **context** (Chrome/Edge 110+)         | `masterGain -> context.destination`                                  | the AudioContext      |
 | **element** (Firefox, Safari, older)   | `masterGain -> destinationStream -> ringoutput` element              | the element           |
 
+Both are feature-detected, never version-sniffed - the table names browsers only
+to say which route each takes today.
+
 Context mode is preferred because it is the only one where the rates cannot
 disagree. In element mode the context is created **without** a `sampleRate` hint
 so it adopts the output hardware's own rate - but the rate it adopts is the
@@ -51,9 +54,13 @@ rate conversion happens inside the context's own render pipeline, which does it
 correctly.
 
 Neither Firefox nor Safari exhibits the Chrome detuning, so element mode is not a
-compromise on the browsers that use it. Note that Safari implements `setSinkId()`
-on neither the AudioContext nor the media element, so there output device
-selection is inert and audio plays to the system default device.
+compromise on the browsers that use it. Both can honour a device selection there:
+`HTMLMediaElement.setSinkId()` landed in Firefox 116 and Safari 18.4.
+
+Where `setSinkId()` exists in **neither** place, output device selection is inert -
+the selection is recorded and announced, but audio plays to the system default
+device. That is now Android (every browser on it, a platform limitation rather
+than an engine one) and Safari before 18.4.
 
 Two things stay on the element path in **both** modes:
 
@@ -65,6 +72,34 @@ Two things stay on the element path in **both** modes:
 - **Remote call audio**, which is rendered in lwpCall rather than in this graph
   (`call.useAudioContext` is off by default), for the timing-slip and clipping
   reasons above.
+- **Secondary ring output**, when one is selected
+  (`ringerGain -> secondaryRingGain -> secondaryRingDestinationStream -> ringoutput2`
+  element). A context has exactly one sink and the primary ring output has
+  already claimed it, so a second ring device can only be reached this way.
+
+### Secondary ring output
+
+`ringoutput2` is an optional second device that rings *in addition to*
+`ringoutput` - the desk phone speaker plus a headset, say. It is `"none"` by
+default and selecting a device for it is what turns it on; see
+[mediaDevices.changeDevice("ringoutput2", deviceId)](/docs/lwpMediaDevices.md#changedevicedevicekind-deviceid).
+The two are never allowed to be the same device, which would only ring one
+speaker twice.
+
+It is fed from `ringerGain`, not `masterGain`, so it carries **the ringer
+channel alone** - ringing and ringtone previews, but not call audio or preview
+loopback. `secondaryRingGain` stands in for the `masterGain` that path never
+reaches, so the master volume still moves both ring outputs together; it sits at
+`0` while no device is selected, which is how the path is switched off (a
+`disconnect()` would take the primary output down with it).
+
+Because it always needs the element hand-off, a browser without
+`HTMLMediaElement.setSinkId()` cannot offer this at all - there
+`mediaDevices.ringoutput2.enabled` is `false` and the path stays silent rather
+than falling back to the default device and ringing the primary speaker twice.
+That is Android and Safari before 18.4; note that it is *element* setSinkId this
+needs, so Firefox 116+ and Safari 18.4+ get a secondary ring output even though
+they have no `AudioContext.setSinkId` and run the primary in element mode.
 
 > This has been a very helpful page to getting better understanding of the implementation details in the browsers: https://padenot.github.io/web-audio-perf
 
@@ -427,7 +462,41 @@ Return:
 
 | Type   | Description                                                                    |
 | ------ | ------------------------------------------------------------------------------ |
-| object | `{ mode, deviceId, sampleRate }` - `mode` is `"context"` or `"element"`, `deviceId` is the device ring output is going to (read from whichever of the two owns the sink) with `""` meaning the browser default, and `sampleRate` is the AudioContext's rate in Hz |
+| object | `{ mode, deviceId, sampleRate, secondary }` - `mode` is `"context"` or `"element"`, `deviceId` is the device ring output is going to (read from whichever of the two owns the sink) with `""` meaning the browser default, `sampleRate` is the AudioContext's rate in Hz, and `secondary` is `{ enabled, deviceId }` for the [secondary ring output](#secondary-ring-output) (always element-sinked, whichever mode the primary is in) |
+
+#### setSecondaryRingOutputEnabled(enabled)
+
+Turns the [secondary ring output](#secondary-ring-output) path on or off. This is
+called by lwpMediaDevices from the `ringoutput2` selection and there is no reason
+for a host application to call it directly - use
+[mediaDevices.changeDevice("ringoutput2", deviceId)](/docs/lwpMediaDevices.md#changedevicedevicekind-deviceid)
+instead, which also moves the sink and updates the selection the renders read.
+
+Parameters:
+
+| Name    | Type    | Default    | Description                                          |
+| ------- | ------- | ---------- | ---------------------------------------------------- |
+| enabled | boolean | *required* | Whether ringing is also sent to the secondary device |
+
+#### isSecondaryRingOutputEnabled()
+
+Return:
+
+| Type    | Description                                                     |
+| ------- | --------------------------------------------------------------- |
+| boolean | `true` when ringing is mirrored to a second device               |
+
+#### getSecondaryRingDestinationStream()
+
+The stream feeding the secondary ring device. Unlike
+[getDestinationStream()](#getdestinationstream)'s full mix this carries the ringer
+channel alone, and is silent unless a secondary device is selected.
+
+Returns:
+
+| Type                                                                       | Description                           |
+| -------------------------------------------------------------------------- | ------------------------------------- |
+| [MediaStream](https://developer.mozilla.org/en-US/docs/Web/API/MediaStream) | A MediaStream from the ringer channel |
 
 #### updateRenders()
 
@@ -504,6 +573,7 @@ Re-paint / update all render targets.
 | audioContext.ringtone.preview.stopped |                                  | Emitted when a ringtone preview stops (manually or via timeout)        |
 | audioContext.ringtone.play.error      | error, sink info (object)        | Emitted when startRinging() cannot play: either the AudioContext was not running (typically the browser's autoplay policy, still awaiting a user gesture) or the ringtone failed to decode - the Error message says which. The ring session itself is unaffected, this is purely informational, and if the context does resume later the ring is started then (see startAudioContext()). The second argument is [getOutputSinkInfo()](#getoutputsinkinfo), included so a failure to ring is diagnosable without a second round trip |
 | audioContext.sink.changed             | sink info (object)               | Emitted when ring output moves to a different device in **context** mode, carrying [getOutputSinkInfo()](#getoutputsinkinfo). Not emitted in element mode - there the device belongs to the element and `mediaDevices.ring.output.changed` is the event to watch |
+| audioContext.ring.output.secondary.enabled | enabled (boolean)           | Emitted when the [secondary ring output](#secondary-ring-output) path is switched on or off, which happens when the `ringoutput2` device selection moves to or away from `"none"` |
 | audioContext.sink.error               | error                            | Emitted when the safety-net sync of the ring output sink fails (see [setRingOutputSinkId()](#setringoutputsinkiddeviceid)). A sink change requested through mediaDevices reports as `mediaDevices.ring.output.error` instead |
 | audioContext.ringtone.preview.error   | error                            | Emitted when previewRingtone() cannot play, for the same two reasons and with the same Error messages - the preview is automatically stopped/rolled back (see stopRingtonePreview()) so the UI doesn't show "Stop" while nothing is playing. Unlike ringing, a preview is not retried if the context resumes later |
 | audioContext.channel.tones.volume     | volume (integer between 0 and 1) | Emitted when the tones channel volume is updated                       |

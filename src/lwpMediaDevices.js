@@ -227,6 +227,23 @@ export default class extends lwpRenderer {
       return Promise.reject();
     }
 
+    // The secondary ring output exists to add a *second* device: pointing it
+    // at the primary's would only play the ringtone twice into one speaker.
+    // The default template already filters that device out of the list, so
+    // this is the guard for a host app calling in directly.
+    if (
+      deviceKind == "ringoutput2" &&
+      this._isPrimaryRingDevice(preferedDevice)
+    ) {
+      const error = new Error(
+        "the secondary ring output cannot be the primary ring output device"
+      );
+
+      this._emit("ring.output.secondary.error", this, error);
+
+      return Promise.reject(error);
+    }
+
     const release = await this._changeStreamMutex.acquire();
     this._preferDevice(preferedDevice);
 
@@ -235,6 +252,10 @@ export default class extends lwpRenderer {
     switch (deviceKind) {
       case "ringoutput":
         return this._changeRingOutputDevice(preferedDevice).finally(release);
+      case "ringoutput2":
+        return this._changeSecondaryRingOutputDevice(preferedDevice).finally(
+          release
+        );
       case "audiooutput":
         return this._changeOutputDevice(preferedDevice).finally(release);
       default:
@@ -271,7 +292,16 @@ export default class extends lwpRenderer {
               return availableDevice.connected && availableDevice.id != "none";
             }
           );
+          // The secondary ring output is opt-in and defaults to none, so it
+          // never promotes itself onto a newly connected device the way the
+          // other kinds do - it only ever falls back to none when whatever it
+          // was using goes away.
+          const isSecondaryRing = deviceKind === "ringoutput2";
+          const replacementDevice = isSecondaryRing
+            ? this._findAvailableDevice(deviceKind, "none")
+            : preferedDevice;
           const switchToPrefered =
+            !isSecondaryRing &&
             selectedDevice &&
             preferedDevice &&
             selectedDevice.preference < preferedDevice.preference;
@@ -282,10 +312,17 @@ export default class extends lwpRenderer {
             selectedDevice.selected = false;
             alteredTrackKinds.push(selectedDevice.trackKind);
 
-            if (preferedDevice) {
-              preferedDevice.selected = true;
-              if (deviceKind === "audiooutput" || deviceKind === "ringoutput") {
-                alteredOutputDevices.push({ deviceKind, device: preferedDevice });
+            if (replacementDevice) {
+              replacementDevice.selected = true;
+              if (
+                ["audiooutput", "ringoutput", "ringoutput2"].includes(
+                  deviceKind
+                )
+              ) {
+                alteredOutputDevices.push({
+                  deviceKind,
+                  device: replacementDevice,
+                });
               }
             }
           }
@@ -348,9 +385,17 @@ export default class extends lwpRenderer {
               }
             });
 
+            // Before the applications below, not after: a primary promoted
+            // onto whatever the secondary is using has to give the secondary
+            // somewhere else to go, and the selections are already settled -
+            // resolving it here keeps it from racing an in-flight change.
+            this._enforceDistinctRingOutputs();
+
             alteredOutputDevices.forEach(({ deviceKind, device }) => {
               if (deviceKind === "ringoutput") {
                 this._changeRingOutputDevice(device);
+              } else if (deviceKind === "ringoutput2") {
+                this._changeSecondaryRingOutputDevice(device);
               } else {
                 this._changeOutputDevice(device);
               }
@@ -380,6 +425,7 @@ export default class extends lwpRenderer {
         none: "None",
         screenCapture: "Screen Capture",
         ringoutput: "Ringing Device",
+        ringoutput2: "Secondary Ringing Device",
         audiooutput: "Speaker",
         audioinput: "Microphone",
         videoinput: "Camera",
@@ -396,6 +442,24 @@ export default class extends lwpRenderer {
   _initProperties(config) {
     const defaults = {
       ringoutput: {
+        enabled: "sinkId" in HTMLMediaElement.prototype,
+        show: true,
+        preferedDeviceIds: [],
+        mediaElement: {
+          create: true,
+          elementId: null,
+          element: null,
+          initParameters: {
+            muted: false,
+          },
+        },
+      },
+      // An optional second device to ring in parallel with `ringoutput`, off
+      // ("none") unless a device is chosen for it. Always element-sinked: an
+      // AudioContext has one sink and the primary ring output already owns it,
+      // so a browser without HTMLMediaElement.setSinkId cannot offer this at
+      // all - hence the same `enabled` test as the other output kinds.
+      ringoutput2: {
         enabled: "sinkId" in HTMLMediaElement.prototype,
         show: true,
         preferedDeviceIds: [],
@@ -482,7 +546,9 @@ export default class extends lwpRenderer {
         this._config[deviceKind].mediaElement.create &&
         this._config[deviceKind].enabled
       ) {
-        if (["audiooutput", "ringoutput"].includes(deviceKind)) {
+        if (
+          ["audiooutput", "ringoutput", "ringoutput2"].includes(deviceKind)
+        ) {
           this._config[deviceKind].mediaElement.element = new Audio();
         } else {
           this._config[deviceKind].mediaElement.element =
@@ -532,6 +598,18 @@ export default class extends lwpRenderer {
       this._config[deviceKind].show =
         this._config[deviceKind].enabled && this._config[deviceKind].show;
     });
+
+    // Seeded before enumeration so it sorts first and is what
+    // _initAvailableDevices() settles on: the secondary ring output is off
+    // unless a device is deliberately chosen for it.
+    this._availableDevices.ringoutput2 = [
+      this._deviceParameters({
+        deviceId: "none",
+        label: "libwebphone:mediaDevices.none",
+        kind: "ringoutput2",
+        displayOrder: 0,
+      }),
+    ];
 
     this._availableDevices.videoinput = [
       this._deviceParameters({
@@ -650,7 +728,13 @@ export default class extends lwpRenderer {
           }
         });
 
-        ["ringoutput", "audiooutput"].forEach((deviceKind) => {
+        // Before anything is applied, not after: a configured
+        // ringoutput2.preferedDeviceIds can name the device the primary
+        // settled on, and resolving that first means the loop below applies
+        // the corrected selection rather than racing it.
+        this._enforceDistinctRingOutputs();
+
+        ["ringoutput", "ringoutput2", "audiooutput"].forEach((deviceKind) => {
           const selectedDevice = this._availableDevices[deviceKind].find(
             (availableDevice) => {
               return availableDevice.selected;
@@ -660,6 +744,8 @@ export default class extends lwpRenderer {
           if (selectedDevice && !this._isOutputAudible(deviceKind)) {
             if (deviceKind == "ringoutput") {
               this._changeRingOutputDevice(selectedDevice);
+            } else if (deviceKind == "ringoutput2") {
+              this._changeSecondaryRingOutputDevice(selectedDevice);
             } else {
               this._changeOutputDevice(selectedDevice);
             }
@@ -701,6 +787,11 @@ export default class extends lwpRenderer {
       this.updateRenders();
     });
     this._libwebphone.on("mediaDevices.ring.output.changed", () => {
+      // Re-renders the secondary selector too: which device it may offer
+      // depends on what the primary just took.
+      this.updateRenders();
+    });
+    this._libwebphone.on("mediaDevices.ring.output.secondary.changed", () => {
       this.updateRenders();
     });
     this._libwebphone.on("mediaDevices.audio.output.changed", () => {
@@ -732,6 +823,7 @@ export default class extends lwpRenderer {
         none: "libwebphone:mediaDevices.none",
         screenCapture: "libwebphone:mediaDevices.screenCapture",
         ringoutput: "libwebphone:mediaDevices.ringoutput",
+        ringoutput2: "libwebphone:mediaDevices.ringoutput2",
         audiooutput: "libwebphone:mediaDevices.audiooutput",
         audioinput: "libwebphone:mediaDevices.audioinput",
         videoinput: "libwebphone:mediaDevices.videoinput",
@@ -745,6 +837,22 @@ export default class extends lwpRenderer {
               if (element.options) {
                 const deviceId = element.options[element.selectedIndex].value;
                 this.changeDevice("ringoutput", deviceId);
+              }
+            },
+          },
+        },
+        ringoutput2: {
+          events: {
+            onchange: (event) => {
+              const element = event.srcElement;
+              if (element.options) {
+                const deviceId = element.options[element.selectedIndex].value;
+                // Caught, unlike the other kinds: changeDevice() rejects a
+                // secondary that duplicates the primary, and the re-render
+                // puts the selector back to what is actually in use.
+                this.changeDevice("ringoutput2", deviceId).catch(() => {
+                  this.updateRenders();
+                });
               }
             },
           },
@@ -806,7 +914,22 @@ export default class extends lwpRenderer {
                 </select>
               </div>
             {{/data.ringoutput.show}}
-            
+
+            {{#data.ringoutput2.show}}
+              <div>
+                <label for="{{by_id.ringoutput2.elementId}}">
+                  {{i18n.ringoutput2}}
+                </label>
+                <select id="{{by_id.ringoutput2.elementId}}">
+                  {{#data.ringoutput2.devices}}
+                    {{#connected}}
+                      <option value="{{id}}" {{#selected}}selected{{/selected}}>{{#isNone}}{{i18n.none}}{{/isNone}}{{^isNone}}{{name}}{{/isNone}}</option>
+                    {{/connected}}
+                  {{/data.ringoutput2.devices}}
+                </select>
+              </div>
+            {{/data.ringoutput2.show}}
+
             {{#data.audiooutput.show}}
               <div>
                 <label for="{{by_id.audiooutput.elementId}}">
@@ -881,6 +1004,18 @@ export default class extends lwpRenderer {
       data[deviceKind].devices = devices;
     });
 
+    // The two ring outputs must be distinct devices, so whatever the primary
+    // is using is not offered as a secondary at all. Copies rather than the
+    // live device objects: `isNone` is presentation only, telling the template
+    // to swap in the translated "None" label for the placeholder entry.
+    data.ringoutput2.devices = data.ringoutput2.devices
+      .filter((device) => {
+        return !this._isPrimaryRingDevice(device);
+      })
+      .map((device) => {
+        return Object.assign({}, device, { isNone: device.id == "none" });
+      });
+
     return data;
   }
 
@@ -911,8 +1046,10 @@ export default class extends lwpRenderer {
         return audioContext.setRingOutputSinkId(preferedDevice.id);
       };
     } else if (element && element.setSinkId !== undefined) {
-      // Guarded: Safari implements setSinkId on neither the context nor the
-      // element, and calling a missing one throws out of this async method.
+      // Guarded rather than assumed: element setSinkId is absent on every
+      // browser on Android, and calling a missing one throws out of this
+      // async method. Feature-detected, not version-sniffed - Safari picked
+      // it up in 18.4, so the set of browsers without it keeps shrinking.
       moveSink = () => {
         return element.setSinkId(preferedDevice.id);
       };
@@ -924,6 +1061,7 @@ export default class extends lwpRenderer {
         preferedDevice,
         "ring.output.changed"
       );
+      this._enforceDistinctRingOutputs();
 
       return;
     }
@@ -936,10 +1074,118 @@ export default class extends lwpRenderer {
           preferedDevice,
           "ring.output.changed"
         );
+        this._enforceDistinctRingOutputs();
       })
       .catch((error) => {
         this._emit("ring.output.error", this, error);
       });
+  }
+
+  // The secondary ring output can only ever be an element sink: an
+  // AudioContext has exactly one sink and the primary ring output already owns
+  // it (see lwpAudioContext._initOutputAudio), so this second device is
+  // reached through its own MediaStream -> <audio> hand-off. lwpAudioContext
+  // owns whether anything is fed down that path; this owns where it lands.
+  async _changeSecondaryRingOutputDevice(preferedDevice) {
+    const audioContext = this._libwebphone.getAudioContext();
+    const element = this._config.ringoutput2.mediaElement.element;
+    // Without a movable sink the secondary would land on the default device -
+    // most likely the primary's, ringing it twice. Better to stay silent.
+    const enabled =
+      preferedDevice.id != "none" &&
+      this._config.ringoutput2.enabled &&
+      !!element &&
+      element.setSinkId !== undefined;
+
+    const finish = () => {
+      if (audioContext) {
+        audioContext.setSecondaryRingOutputEnabled(enabled);
+      }
+
+      if (enabled) {
+        this._playMediaElement("ringoutput2");
+      } else if (
+        this._config.manageMediaElements &&
+        element &&
+        !element.paused
+      ) {
+        element.pause();
+      }
+
+      this._markOutputDeviceSelected(
+        "ringoutput2",
+        preferedDevice,
+        "ring.output.secondary.changed"
+      );
+    };
+
+    if (!enabled) {
+      finish();
+
+      return;
+    }
+
+    return Promise.resolve()
+      .then(() => {
+        return element.setSinkId(preferedDevice.id);
+      })
+      .then(finish)
+      .catch((error) => {
+        this._emit("ring.output.secondary.error", this, error);
+      });
+  }
+
+  // Whether a ringoutput2 device would land on the speaker the primary ring
+  // output is already using. Not just an id comparison: browsers expose
+  // aliases ("default", "communications") for the same physical output, and
+  // those carry the concrete device's groupId - without that check the
+  // secondary could ring the primary's speaker under a different id. Empty
+  // groupIds, which some permission states produce, never match.
+  _isPrimaryRingDevice(device) {
+    const primaryRingDevice = this.getPreferedDevice("ringoutput");
+
+    if (!device || device.id == "none" || !primaryRingDevice) {
+      return false;
+    }
+
+    if (device.id == primaryRingDevice.id) {
+      return true;
+    }
+
+    return !!(
+      device.groupId &&
+      primaryRingDevice.groupId &&
+      device.groupId == primaryRingDevice.groupId
+    );
+  }
+
+  _isSecondaryRingOutputSelected() {
+    const selectedDevice = this.getPreferedDevice("ringoutput2");
+
+    return !!(selectedDevice && selectedDevice.id != "none");
+  }
+
+  // Ringing the same speaker twice is never what was asked for, so where the
+  // primary ring output has moved onto the secondary's device the secondary
+  // gives way and switches itself off.
+  _enforceDistinctRingOutputs() {
+    const selectedDevice = this.getPreferedDevice("ringoutput2");
+
+    if (!this._isPrimaryRingDevice(selectedDevice)) {
+      return;
+    }
+
+    const noneDevice = this._findAvailableDevice("ringoutput2", "none");
+
+    if (!noneDevice) {
+      return;
+    }
+
+    // Not through changeDevice(): this runs from inside the device-change
+    // mutex, which is not reentrant.
+    this._preferDevice(noneDevice);
+
+    return this._changeSecondaryRingOutputDevice(noneDevice);
   }
 
   _isOutputAudible(deviceKind) {
@@ -951,7 +1197,7 @@ export default class extends lwpRenderer {
 
     // The audiooutput element carries only the DTMF tones stream, whose
     // sounds are ~150ms transients - not worth deferring a sink change for.
-    if (deviceKind != "ringoutput") {
+    if (deviceKind != "ringoutput" && deviceKind != "ringoutput2") {
       return false;
     }
 
@@ -1387,6 +1633,23 @@ export default class extends lwpRenderer {
     });
   }
 
+  _playMediaElement(deviceKind) {
+    const element = this._config[deviceKind].mediaElement.element;
+
+    if (!this._config.manageMediaElements || !element || !element.paused) {
+      return;
+    }
+
+    element.play().catch((error) => {
+      this._emit(
+        this._deviceKindtoEventKind(deviceKind) + ".play.error",
+        this,
+        element,
+        error
+      );
+    });
+  }
+
   _startMediaElements() {
     if (this._config.manageMediaElements) {
       const audioContext = this._libwebphone.getAudioContext();
@@ -1401,21 +1664,16 @@ export default class extends lwpRenderer {
           return;
         }
 
+        // The secondary ring output is deliberately silent until a device is
+        // chosen for it - playing it here would undo that.
         if (
-          this._config[deviceKind].mediaElement.element &&
-          this._config[deviceKind].mediaElement.element.paused
+          deviceKind == "ringoutput2" &&
+          !this._isSecondaryRingOutputSelected()
         ) {
-          this._config[deviceKind].mediaElement.element
-            .play()
-            .catch((error) => {
-              this._emit(
-                this._deviceKindtoEventKind(deviceKind) + ".play.error",
-                this,
-                this._config[deviceKind].mediaElement.element,
-                error
-              );
-            });
+          return;
         }
+
+        this._playMediaElement(deviceKind);
       });
     }
   }
@@ -1589,6 +1847,7 @@ export default class extends lwpRenderer {
   _deviceKindtoTrackKind(deviceKind) {
     switch (deviceKind) {
       case "ringoutput":
+      case "ringoutput2":
       case "audiooutput":
       case "audioinput":
         return "audio";
@@ -1601,6 +1860,8 @@ export default class extends lwpRenderer {
     switch (deviceKind) {
       case "ringoutput":
         return "ring.output";
+      case "ringoutput2":
+        return "ring.output.secondary";
       case "audiooutput":
         return "audio.output";
       case "audioinput":
@@ -1611,28 +1872,42 @@ export default class extends lwpRenderer {
   }
 
   _deviceKinds() {
-    return ["ringoutput", "audiooutput", "audioinput", "videoinput"];
+    return [
+      "ringoutput",
+      "ringoutput2",
+      "audiooutput",
+      "audioinput",
+      "videoinput",
+    ];
   }
 
   /** Shims */
 
+  // Both ring output kinds are synthesised from the enumerated audiooutput
+  // devices: the browser has no notion of "a device to ring on", so each real
+  // output is offered once per ring kind and tracked separately from there.
   async _shimEnumerateDevices() {
     const devices = await navigator.mediaDevices.enumerateDevices();
     const ringoutputDevices = [];
 
     devices.forEach((device) => {
       if (device.kind !== "audiooutput") return;
-      ringoutputDevices.push(this._outputDeviceToRingDevice(device));
+      ringoutputDevices.push(
+        this._outputDeviceToRingDevice(device, "ringoutput")
+      );
+      ringoutputDevices.push(
+        this._outputDeviceToRingDevice(device, "ringoutput2")
+      );
     });
 
     return devices.concat(ringoutputDevices);
   }
 
-  _outputDeviceToRingDevice(device) {
+  _outputDeviceToRingDevice(device, kind = "ringoutput") {
     return {
       deviceId: device.deviceId,
       groupId: device.groupId,
-      kind: "ringoutput",
+      kind: kind,
       label: device.label,
     };
   }

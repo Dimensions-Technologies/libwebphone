@@ -460,6 +460,37 @@ export default class extends lwpRenderer {
       });
   }
 
+  // Whether ringing is mirrored to a second device as well as the primary
+  // ring output. lwpMediaDevices decides this from the ringoutput2 selection
+  // and owns which device it lands on (the sink of the ringoutput2 element);
+  // all this controls is whether anything is sent down that path.
+  setSecondaryRingOutputEnabled(enabled) {
+    enabled = !!enabled;
+
+    if (!this._outputAudio.secondaryRingGain) {
+      return;
+    }
+
+    if (enabled == this._outputAudio.secondaryRingEnabled) {
+      return;
+    }
+
+    this._outputAudio.secondaryRingEnabled = enabled;
+    this._setSecondaryRingGain(enabled ? this._secondaryRingVolume() : 0);
+
+    this._emit("ring.output.secondary.enabled", this, enabled);
+  }
+
+  isSecondaryRingOutputEnabled() {
+    return !!this._outputAudio.secondaryRingEnabled;
+  }
+
+  // The stream feeding the secondary ring device - the ringer channel alone,
+  // unlike getDestinationStream()'s full mix.
+  getSecondaryRingDestinationStream() {
+    return this._outputAudio.secondaryRingDestinationStream.stream;
+  }
+
   // Where ring output is going, and at what rate. Exposed for diagnosis: a
   // rate that disagrees with the device's is audible as detuning (see
   // _shimAudioContext) but otherwise invisible to a host application.
@@ -472,6 +503,11 @@ export default class extends lwpRenderer {
         ? this._outputAudio.sinkId
         : this._getRingOutputElementSinkId(),
       sampleRate: this._audioContext.sampleRate,
+      // Always element-sinked, whichever mode the primary is in.
+      secondary: {
+        enabled: this.isSecondaryRingOutputEnabled(),
+        deviceId: this._getMediaElementSinkId("ringoutput2"),
+      },
     };
   }
 
@@ -669,9 +705,11 @@ export default class extends lwpRenderer {
     // and with it the detuning that hand-off causes when the context's sample
     // rate and the device's disagree (see _shimAudioContext).
     //
-    // Firefox and Safari fall back to piping masterGain through a MediaStream
-    // to the ringoutput element, the only way they can honour a device
-    // selection at all. Neither detunes, so the fallback costs them nothing.
+    // Firefox and Safari have no AudioContext.setSinkId, so they fall back to
+    // piping masterGain through a MediaStream to the ringoutput element - the
+    // only way they can honour a device selection at all (and they can:
+    // HTMLMediaElement.setSinkId landed in Firefox 116 and Safari 18.4).
+    // Neither detunes, so the fallback costs them nothing.
     this._outputAudio.usingContextSink =
       typeof this._audioContext.setSinkId == "function";
 
@@ -713,12 +751,46 @@ export default class extends lwpRenderer {
       this._outputAudio.usingAudioElement = false;
     }
 
+    // Secondary ring output. A context has exactly one sink and the ring
+    // output above has already claimed it (or the ringoutput element has), so
+    // a second ring device can only be reached through a second MediaStream ->
+    // <audio> hand-off - regardless of which route the primary took.
+    //
+    // Fed from ringerGain rather than masterGain: this is "ring my other
+    // speaker too", not a second copy of everything the mixer carries, so
+    // call audio and preview loopback stay off it. That does mean it bypasses
+    // masterGain, hence the stand-in below.
+    this._outputAudio.secondaryRingGain = this._shimCreateGain(
+      this._outputAudio.context
+    );
+    // Silent until lwpMediaDevices picks a device for it. Gated by gain rather
+    // than by connect/disconnect, because a blanket disconnect() would take
+    // masterGain - the primary ring output - down with it, and the targeted
+    // disconnect(destination) that wouldn't is the harder call to get right
+    // across implementations for no gain over a ramp.
+    this._outputAudio.secondaryRingGain.gain.value = 0;
+    this._outputAudio.secondaryRingEnabled = false;
+    this._outputAudio.ringerGain.connect(this._outputAudio.secondaryRingGain);
+
+    this._outputAudio.secondaryRingDestinationStream =
+      this._shimCreateMediaStreamDestination(this._outputAudio.context);
+    this._outputAudio.secondaryRingGain.connect(
+      this._outputAudio.secondaryRingDestinationStream
+    );
+
     if (mediaDevices) {
       const speakerElement = mediaDevices.getMediaElement("audiooutput");
       if (speakerElement) {
         speakerElement.srcObject =
           this._outputAudio.tonesDestinationStream.stream;
         speakerElement.volume = this._config.channels.master.volume;
+      }
+
+      const secondaryRingerElement =
+        mediaDevices.getMediaElement("ringoutput2");
+      if (secondaryRingerElement) {
+        secondaryRingerElement.srcObject =
+          this._outputAudio.secondaryRingDestinationStream.stream;
       }
     }
   }
@@ -927,6 +999,11 @@ export default class extends lwpRenderer {
         if (speakerElement) {
           speakerElement.volume = volume;
         }
+      }
+      // The secondary ring output bypasses masterGain, so its stand-in for it
+      // has to be moved by hand - see _secondaryRingVolume().
+      if (this.isSecondaryRingOutputEnabled()) {
+        this._setSecondaryRingGain(this._secondaryRingVolume());
       }
       this.updateRenders();
     });
@@ -1187,14 +1264,46 @@ export default class extends lwpRenderer {
   }
 
   // Empty string where there is no element, or where the browser doesn't
-  // implement sinkId at all (Safari) - both mean "the default device".
-  _getRingOutputElementSinkId() {
+  // implement sinkId at all (anything on Android) - both mean "the default
+  // device".
+  _getMediaElementSinkId(deviceKind) {
     const mediaDevices = this._libwebphone.getMediaDevices();
     const element = mediaDevices
-      ? mediaDevices.getMediaElement("ringoutput")
+      ? mediaDevices.getMediaElement(deviceKind)
       : null;
 
     return (element && element.sinkId) || "";
+  }
+
+  _getRingOutputElementSinkId() {
+    return this._getMediaElementSinkId("ringoutput");
+  }
+
+  // ringerGain has already applied the ringer level, but the secondary path
+  // never reaches masterGain - this stands in for it so both ring outputs
+  // track the master volume together.
+  _secondaryRingVolume() {
+    return this._config.channels.ringer.connectToMaster
+      ? this._config.channels.master.volume
+      : 1.0;
+  }
+
+  _setSecondaryRingGain(volume) {
+    const gainNode = this._outputAudio.secondaryRingGain;
+    const context = this._audioContext;
+
+    if (!gainNode) {
+      return;
+    }
+
+    // Ramped for the same reason changeVolume() ramps - a single-sample step
+    // clicks against a ring already playing, which enabling a second device
+    // mid-ring would otherwise do.
+    if (context.state == "running") {
+      gainNode.gain.setTargetAtTime(volume, context.currentTime, 0.015);
+    } else {
+      gainNode.gain.value = volume;
+    }
   }
 
   // Ordering safety net, not the main path: lwpMediaDevices starts

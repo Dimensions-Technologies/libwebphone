@@ -1271,6 +1271,15 @@
                         {{/data.ringoutput.devices}}
                       </fieldset>
 
+                      <fieldset id="ringoutput2">
+                        <legend>{{i18n.ringoutput2}}</legend>
+                        {{#data.ringoutput2.devices}}
+                          {{#connected}}
+                            <div><input type="radio" value="{{id}}" name="{{by_name.ringoutput2selector.elementName}}" {{#selected}}checked{{/selected}}>{{#isNone}}{{i18n.none}}{{/isNone}}{{^isNone}}{{name}}{{/isNone}}</input></div>
+                          {{/connected}}
+                        {{/data.ringoutput2.devices}}
+                      </fieldset>
+
                       <fieldset id="audiooutput">
                         <legend>{{i18n.audiooutput}}</legend>
                         {{#data.audiooutput.devices}}
@@ -1319,6 +1328,19 @@
                           webphone
                             .getMediaDevices()
                             .changeDevice("ringoutput", element.value);
+                        },
+                      },
+                    },
+                    ringoutput2selector: {
+                      events: {
+                        onchange: (event) => {
+                          const element = event.srcElement;
+                          webphone
+                            .getMediaDevices()
+                            .changeDevice("ringoutput2", element.value)
+                            .catch(() => {
+                              webphone.getMediaDevices().updateRenders();
+                            });
                         },
                       },
                     },
