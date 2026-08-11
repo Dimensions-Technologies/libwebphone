@@ -804,10 +804,15 @@ export default class {
         .getPreferedDevice(deviceKind);
 
       if (preferedDevice) {
+        // Both branches are needed: setSinkId throws synchronously where it
+        // isn't implemented, and rejects asynchronously for a device it can't
+        // use - a try/catch alone leaves the latter unhandled.
         try {
-          element.setSinkId(preferedDevice.id);
+          element.setSinkId(preferedDevice.id).catch((error) => {
+            this._emit("error", error);
+          });
         } catch (error) {
-         this._emit("error", error);
+          this._emit("error", error);
         }
       }
     }
@@ -841,7 +846,10 @@ export default class {
         },
         elements: {
           audio: this._initMediaElement("audio", "audiooutput"),
-          video: this._initMediaElement("video", "videoinput"),
+          // "audiooutput", not "videoinput": the only thing _initMediaElement
+          // does with the device kind is setSinkId(), which wants an audio
+          // output. Passing a camera id rejects with NotFoundError.
+          video: this._initMediaElement("video", "audiooutput"),
         },
       },
       local: {
@@ -852,7 +860,10 @@ export default class {
         },
         elements: {
           audio: this._initMediaElement("audio", "audiooutput"),
-          video: this._initMediaElement("video", "videoinput"),
+          // "audiooutput", not "videoinput": the only thing _initMediaElement
+          // does with the device kind is setSinkId(), which wants an audio
+          // output. Passing a camera id rejects with NotFoundError.
+          video: this._initMediaElement("video", "audiooutput"),
         },
       },
     };
@@ -919,8 +930,12 @@ export default class {
         Object.keys(this._streams.remote.elements).forEach((kind) => {
           const element = this._streams.remote.elements[kind];
           if (element && element.setSinkId !== undefined) {
+            // As in _initMediaElement(): catch both the synchronous throw and
+            // the rejection.
             try {
-              element.setSinkId(preferedDevice.id);
+              element.setSinkId(preferedDevice.id).catch((error) => {
+                this._emit("error", error);
+              });
             } catch (error) {
               this._emit("error", error);
             }
@@ -1203,6 +1218,9 @@ export default class {
           if (track) {
             this._streams[type].kinds[kind] = true;
             if (!element.srcObject || element.srcObject.id != mediaStream.id) {
+              // A declickPause() still winding down from an earlier
+              // disconnect must not pause the stream we're attaching.
+              lwpUtils.cancelDeclickPause(element);
               element.srcObject = mediaStream;
             }
           } else {
@@ -1271,6 +1289,14 @@ export default class {
     Object.keys(this._streams).forEach((type) => {
       Object.keys(this._streams[type].elements).forEach((kind) => {
         const element = this._streams[type].elements[kind];
+        if (element) {
+          // Outside the paused check, not inside it: mid-declick the element
+          // is still *playing* (muted, pause pending), so a demote->promote
+          // landing in that window would take neither branch and the pending
+          // pause would then silence audio that should be running.
+          lwpUtils.cancelDeclickPause(element);
+        }
+
         if (element && element.paused) {
           element.play().catch(() => {
             /*
@@ -1314,7 +1340,14 @@ export default class {
       Object.keys(this._streams[type].elements).forEach((kind) => {
         const element = this._streams[type].elements[kind];
         if (element && !element.paused) {
-          element.pause();
+          if (kind == "audio" && !element.muted) {
+            // Only unmuted audio is actually producing sound, so only it can
+            // click when cut mid-waveform. Video and muted elements pause
+            // immediately, as before.
+            lwpUtils.declickPause(element);
+          } else {
+            element.pause();
+          }
         }
         this._emit(type + "." + kind + ".disconnect", this, element);
       });

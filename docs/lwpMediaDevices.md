@@ -116,6 +116,18 @@ For the provided device kind attmpet to switch to the provided device id, updati
 | deviceKind | string |         | The device kind to switch (ringoutput, audiooutput, audioinput, videoinput) |
 | deviceId   | string |         | The device id to switch to                                      |
 
+> For `ringoutput` there are two places the device can be set, and this picks the
+> right one: where the AudioContext owns its own sink (Chrome/Edge 110+, see
+> [lwpAudioContext output device routing](/docs/lwpAudioContext.md#output-device-routing))
+> it is set on the context, otherwise on the `ringoutput` media element. Either
+> way the selection is only marked (and `mediaDevices.ring.output.changed` only
+> emitted) once the sink has actually moved, so a `setSinkId()` that fails leaves
+> the selection showing the device still in use.
+
+> Where a browser implements `setSinkId()` in neither place - Safari - output
+> device selection is inert: the selection is recorded and announced, but audio
+> continues to the system default device.
+
 #### refreshAvailableDevices()
 
 Verify that all discovered devices are still conntect, remove any from the list that are not and add any newly connected device. If the active device is no longer connected will also automatically switch to the next connected prefered device.
@@ -188,7 +200,10 @@ Re-paint / update all render targets.
 | mediaDevices.video.output.element | [HTML Video Element](https://developer.mozilla.org/en-US/docs/Web/HTML/Element/video) | Emitted when the HTML audio element is created  |
 | mediaDevices.getUserMedia.error   | error (exception)                                                                     | Emitted if getUserMedia() throws                |
 | mediaDevices.ring.output.changed | preferedDevice                                                                        | Emitted when the ring output audio device is changed |
+| mediaDevices.ring.output.error   | error                                                                                  | Emitted when setSinkId() fails while switching the ring output device, whether it was called on the AudioContext or on the media element |
 | mediaDevices.audio.output.changed | preferedDevice                                                                        | Emitted when the output audio device is changed |
+| mediaDevices.audio.output.error  | error (exception)                                                                     | Emitted when setSinkId() fails while switching the audio output device |
+| mediaDevices.{kind}.play.error   | element, error                                                                        | Emitted when `_startMediaElements()` cannot start a media element, usually the browser withholding playback until a user gesture. `{kind}` is one of `ring.output`, `audio.output`, `audio.input` or `video.input` (e.g. `mediaDevices.ring.output.play.error`). Left unhandled this failed invisibly, which matters because in element mode lwpAudioContext routes ringtones through the ring output element - a blocked output element means a silent ring. The ring output element is skipped entirely where the AudioContext owns its own sink, since nothing is attached to it there |
 | mediaDevices.audio.input.muted    | trackParameters (lwpUtil.trackParameters)                                             | Emitted when the input audio is muted           |
 | mediaDevices.video.input.muted    | trackParameters (lwpUtil.trackParameters)                                             | Emitted when the input audio is muted           |
 | mediaDevices.audio.input.unmuted  | trackParameters (lwpUtil.trackParameters)                                             | Emitted when the input audio is unmuted         |

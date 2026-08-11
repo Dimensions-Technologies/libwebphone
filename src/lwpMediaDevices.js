@@ -229,19 +229,16 @@ export default class extends lwpRenderer {
 
     const release = await this._changeStreamMutex.acquire();
     this._preferDevice(preferedDevice);
+
+    // finally(), not then(): a rejection would otherwise hold the mutex
+    // forever, deadlocking every subsequent device change.
     switch (deviceKind) {
       case "ringoutput":
-        return this._changeRingOutputDevice(preferedDevice).then(() => {
-          release();
-        });
+        return this._changeRingOutputDevice(preferedDevice).finally(release);
       case "audiooutput":
-        return this._changeOutputDevice(preferedDevice).then(() => {
-          release();
-        });
+        return this._changeOutputDevice(preferedDevice).finally(release);
       default:
-        return this._changeInputDevice(preferedDevice).then(() => {
-          release();
-        });
+        return this._changeInputDevice(preferedDevice).finally(release);
     }
   }
 
@@ -653,6 +650,22 @@ export default class extends lwpRenderer {
           }
         });
 
+        ["ringoutput", "audiooutput"].forEach((deviceKind) => {
+          const selectedDevice = this._availableDevices[deviceKind].find(
+            (availableDevice) => {
+              return availableDevice.selected;
+            }
+          );
+
+          if (selectedDevice && !this._isOutputAudible(deviceKind)) {
+            if (deviceKind == "ringoutput") {
+              this._changeRingOutputDevice(selectedDevice);
+            } else {
+              this._changeOutputDevice(selectedDevice);
+            }
+          }
+        });
+
         this._loaded = true;
         this._emit("devices.loaded", this, this._availableDevices);
         this.updateRenders();
@@ -873,82 +886,115 @@ export default class extends lwpRenderer {
 
   /** Helper functions */
 
-  async _changeRingOutputDevice(preferedDevice) {
-    if (this._config.ringoutput.mediaElement.element) {
-      return this._config.ringoutput.mediaElement.element
-        .setSinkId(preferedDevice.id)
-        .then(() => {
-          this._availableDevices["ringoutput"].forEach((availableDevice) => {
-            if (availableDevice.id == preferedDevice.id) {
-              availableDevice.selected = true;
-            } else {
-              availableDevice.selected = false;
-            }
-          });
+  // Called once the sink has actually moved (or immediately, where there is no
+  // sink to move): the renders and getPreferedDevice() read this selection, so
+  // it must not run ahead of a setSinkId() that then fails.
+  _markOutputDeviceSelected(deviceKind, preferedDevice, eventName) {
+    this._availableDevices[deviceKind].forEach((availableDevice) => {
+      availableDevice.selected = availableDevice.id == preferedDevice.id;
+    });
 
-          if (this._config.ringoutput.enabled) {
-            this._emit("ring.output.changed", this, preferedDevice);
-          }
-        })
-        .catch((error) => {
-          this._emit("ring.output.error", error);
-        });
-    } else {
-      this._availableDevices["ringoutput"].forEach((availableDevice) => {
-        if (availableDevice.id == preferedDevice.id) {
-          availableDevice.selected = true;
-        } else {
-          availableDevice.selected = false;
-        }
-      });
-
-      if (this._config.ringoutput.enabled) {
-        this._emit("ring.output.changed", this, preferedDevice);
-      }
-
-      return Promise.resolve();
+    if (this._config[deviceKind].enabled) {
+      this._emit(eventName, this, preferedDevice);
     }
   }
 
-  async _changeOutputDevice(preferedDevice) {
-    if (this._config.audiooutput.mediaElement.element) {
-      return this._config.audiooutput.mediaElement.element
-        .setSinkId(preferedDevice.id)
-        .then(() => {
-          this._availableDevices[preferedDevice.deviceKind].forEach(
-            (availableDevice) => {
-              if (availableDevice.id == preferedDevice.id) {
-                availableDevice.selected = true;
-              } else {
-                availableDevice.selected = false;
-              }
-            }
-          );
+  async _changeRingOutputDevice(preferedDevice) {
+    const audioContext = this._libwebphone.getAudioContext();
+    const element = this._config.ringoutput.mediaElement.element;
+    let moveSink = null;
 
-          if (this._config.audiooutput.enabled) {
-            this._emit("audio.output.changed", this, preferedDevice);
-          }
-        })
-        .catch((error) => {
-          this._emit("audio.output.error", error);
-        });
-    } else {
-      this._availableDevices[preferedDevice.deviceKind].forEach(
-        (availableDevice) => {
-          if (availableDevice.id == preferedDevice.id) {
-            availableDevice.selected = true;
-          } else {
-            availableDevice.selected = false;
-          }
-        }
+    if (audioContext && audioContext.usesContextSink()) {
+      // The context owns the sink, not the element - see
+      // lwpAudioContext._initOutputAudio().
+      moveSink = () => {
+        return audioContext.setRingOutputSinkId(preferedDevice.id);
+      };
+    } else if (element && element.setSinkId !== undefined) {
+      // Guarded: Safari implements setSinkId on neither the context nor the
+      // element, and calling a missing one throws out of this async method.
+      moveSink = () => {
+        return element.setSinkId(preferedDevice.id);
+      };
+    }
+
+    if (!moveSink) {
+      this._markOutputDeviceSelected(
+        "ringoutput",
+        preferedDevice,
+        "ring.output.changed"
       );
 
-      if (this._config.audiooutput.enabled) {
-        this._emit("audio.output.changed", this, preferedDevice);
-      }
-
-      return Promise.resolve();
+      return;
     }
+
+    return Promise.resolve()
+      .then(moveSink)
+      .then(() => {
+        this._markOutputDeviceSelected(
+          "ringoutput",
+          preferedDevice,
+          "ring.output.changed"
+        );
+      })
+      .catch((error) => {
+        this._emit("ring.output.error", this, error);
+      });
+  }
+
+  _isOutputAudible(deviceKind) {
+    const audioContext = this._libwebphone.getAudioContext();
+
+    if (!audioContext) {
+      return false;
+    }
+
+    // The audiooutput element carries only the DTMF tones stream, whose
+    // sounds are ~150ms transients - not worth deferring a sink change for.
+    if (deviceKind != "ringoutput") {
+      return false;
+    }
+
+    // Everything through masterGain lands on the ring output, whether that's
+    // the element or the context's own sink - both are audible to move.
+    return (
+      audioContext.isRinging() ||
+      audioContext.isRingtonePreviewActive() ||
+      audioContext.isPreviewToneActive() ||
+      audioContext.isPreviewLoopbackActive()
+    );
+  }
+
+  async _changeOutputDevice(preferedDevice) {
+    const element = this._config.audiooutput.mediaElement.element;
+
+    // No context-sink branch: the tones stream stays on the element path in
+    // every mode (a context has one sink, and this is the speaker device
+    // rather than the ring one). Same setSinkId guard as above.
+    if (!element || element.setSinkId === undefined) {
+      this._markOutputDeviceSelected(
+        preferedDevice.deviceKind,
+        preferedDevice,
+        "audio.output.changed"
+      );
+
+      return;
+    }
+
+    return Promise.resolve()
+      .then(() => {
+        return element.setSinkId(preferedDevice.id);
+      })
+      .then(() => {
+        this._markOutputDeviceSelected(
+          preferedDevice.deviceKind,
+          preferedDevice,
+          "audio.output.changed"
+        );
+      })
+      .catch((error) => {
+        this._emit("audio.output.error", this, error);
+      });
   }
 
   _muteInput(deviceKind = null) {
@@ -1343,12 +1389,32 @@ export default class extends lwpRenderer {
 
   _startMediaElements() {
     if (this._config.manageMediaElements) {
+      const audioContext = this._libwebphone.getAudioContext();
+      const contextOwnsRingSink = !!(
+        audioContext && audioContext.usesContextSink()
+      );
+
       this._deviceKinds().forEach((deviceKind) => {
+        // Nothing is attached to the ringoutput element in context-sink mode,
+        // so there is nothing here to play.
+        if (deviceKind == "ringoutput" && contextOwnsRingSink) {
+          return;
+        }
+
         if (
           this._config[deviceKind].mediaElement.element &&
           this._config[deviceKind].mediaElement.element.paused
         ) {
-          this._config[deviceKind].mediaElement.element.play();
+          this._config[deviceKind].mediaElement.element
+            .play()
+            .catch((error) => {
+              this._emit(
+                this._deviceKindtoEventKind(deviceKind) + ".play.error",
+                this,
+                this._config[deviceKind].mediaElement.element,
+                error
+              );
+            });
         }
       });
     }

@@ -665,6 +665,24 @@ takes priority over the top-level config for that call only.
 | call.remote.audio.disconnect       | element ([HTML audio element](https://developer.mozilla.org/en-US/docs/Web/HTML/Element/audio))                            | Emitted when the instance is demoted and has issued a pause command to the HTML element                                                                                                                                                                                                                     |
 | call.remote.video.disconnect       | element ([HTML video element](https://developer.mozilla.org/en-US/docs/Web/HTML/Element/video))                            | Emitted when the instance is demoted and has issued a pause command to the HTML element                                                                                                                                                                                                                     |
 
+> NOTE! For **unmuted audio** elements the pause is deferred rather than
+> immediate: the element is muted first and actually paused a short moment
+> later (~50ms), then unmuted. Pausing outright cuts the waveform wherever it
+> happens to be, and if that isn't near a zero crossing it is heard as a
+> click; muting first gives the element time to render near-silent audio
+> before the cut. The `.disconnect` event is still emitted immediately, so an
+> `element.paused` read from that handler will be `false` for that brief
+> window, and `element.muted` will be `true`. Video and already-muted
+> elements have nothing audible to click on and are paused immediately as
+> before. Re-connecting the element (promoting the call again) cancels a
+> pending pause and unmutes immediately, so a demote immediately followed by
+> a promote is not left silent.
+>
+> The mute uses `muted` rather than writing `volume = 0` and restoring it,
+> deliberately: `muted` is a separate axis from `volume`, so it cannot
+> collide with anything else writing volume on these elements during that
+> window (`changeVolume()` reacting to a master volume event, for instance).
+
 > NOTE! All standard HTML media events for the local audio, local video, remote
 > audio and remote video elements are emitted as call.{type}.{kind}.{eventName}
 > with the additional parameters: element (HTML element), event (HTML media

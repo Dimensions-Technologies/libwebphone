@@ -151,6 +151,49 @@ Build and minimize the library for a production deployment.
 
 Analyze the source code for programming and style issues.
 
+#### npm run ringtones:build
+
+Regenerates `src/lwpRingtones.js` from every `.wav` file in `assets/sounds/`, base64-encoding each one into the committed module consumed by `lwpAudioContext` (see [lwpAudioContext - Configuration](docs/lwpAudioContext.md#configuration)). Run this after adding, removing, or replacing files in `assets/sounds/`. See [Ringtones](#ringtones) below for the format new files need to follow.
+
+## Ringtones
+
+Ringtone files live in `assets/sounds/` and are bundled directly into the library at build time - `npm run ringtones:build` reads every `.wav` file there and inlines it as a base64 `data:` URI into `src/lwpRingtones.js`, so a ringtone plays with zero network requests and works identically whether libwebphone is loaded as `dist/libwebphone.js` or imported from source. This also means file size matters directly: every byte in `assets/sounds/` ends up duplicated (base64 is ~33% larger) in the shipped JS bundle. The 12 bundled ringtones currently total ~422KB of WAV, which is ~564KB of `src/lwpRingtones.js`.
+
+The filename becomes the ringtone's id and display name automatically (`marimba-cascade.wav` - id `marimba-cascade`, name "Marimba Cascade"), so name files descriptively. A trailing digit run is split off and stripped of leading zeros, so the bundled `ring01.wav` - id `ring01`, name "Ring 1".
+
+### Bundled ringtones (ring01-ring12)
+
+| File | Duration | Pattern | Descriptive name |
+| ---- | -------- | ------- | ----------------- |
+| ring01.wav | 3.4s | 18 pulses, steady ~444Hz | Rapid Pulse (Original) |
+| ring02.wav | 2.4s | 8 pulses, steady ~444Hz, smoother tone | Slow Pulse |
+| ring03.wav | 2.0s | 2 notes, low-to-high leap (211-615Hz) | Classic Ring 1|
+| ring04.wav | 2.0s | 2 notes, wider leap (195-800Hz) | Classic Ring 2 |
+| ring05.wav | 2.0s | 11 pulses, steady ~471Hz, brighter tone | Classic Ring 3 |
+| ring06.wav | 2.0s | 3 notes, sweeps 250-1000-250Hz | Sweep Rise |
+| ring07.wav | 2.0s | 1 sustained tone, ~400Hz | Warble Alert |
+| ring08.wav | 2.3s | 6 pulses, jumping 667/444/889Hz | Triple Chime |
+| ring09.wav | 2.4s | 8 pulses, jumping 444/889/667Hz | Melodic Pulse |
+| ring10.wav | 1.8s | 5 pulses, ascending run 533-1143Hz | Ascending Run |
+| ring11.wav | 2.3s | 6 pulses, bouncing 444-667Hz | Bouncing Trill |
+| ring12.wav | 2.4s | 1 pulse, noisy/non-tonal, low wandering pitch | X |
+
+### Adding new ringtones
+
+New files must be **just the loop content** - a single cycle, not the melody repeated or padded out to a fixed longer duration. Padding a short melody out to e.g. 10-12 seconds of repeated audio at full quality multiplies the file size for no audible benefit, since the app already loops the file continuously for the duration of the ring (as a looping `AudioBufferSourceNode`, which loops sample-accurately - a clean single cycle has no seam).
+
+Target format for a new ringtone file:
+
+- **Format:** WAV, PCM, 16-bit, mono, 8000Hz sample rate
+- **Duration:** 1.5-4 seconds of actual audio content - exactly one loop cycle
+- **Loop-ability:** clean start/end so the loop has no click or gap at the seam (a short ~10-15ms fade in/out helps)
+- **Levels:** peak amplitude around 0.7-0.85 of full scale (leave headroom, don't clip) - final volume is scaled by the app at playback time
+- **Content:** fully original synthesized audio - not derived from, based on, or an imitation of any real product's ringtone, and not containing any recognizable melody from an existing song
+
+At these settings a typical file lands in roughly the 20-70KB range. If a ringtone specifically needs stereo movement (e.g. left/right panning or echo effects), use stereo at 11025Hz instead - this roughly doubles the file size for the same duration, so only use it when the effect actually requires it.
+
+After adding, removing, or replacing files in `assets/sounds/`, run `npm run ringtones:build` to regenerate `src/lwpRingtones.js`.
+
 ## Components
 
 The phone funtionality is implemented by classes that encapsulated the logic for a particular component, those are:
