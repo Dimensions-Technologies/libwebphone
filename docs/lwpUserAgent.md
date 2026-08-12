@@ -51,6 +51,36 @@ Events named in the `debug_ignored_events` configuration are excluded from the
 console output. They are still emitted normally, so anything listening for them
 is unaffected.
 
+It also enables the library's own internal tracing, which is separate from the
+event log above: `debug` namespaces under `libwebphone:*`, created on the same
+`debug` instance JsSIP uses, so they print in the same styled
+`namespace message` form as `JsSIP:Transport` and interleave with the SIP trace
+in the order things actually happened. Currently that is
+`libwebphone:callWaiting` - see
+[the call waiting tone](lwpAudioContext.md#tracing-the-call-waiting-tone). These
+cost a boolean read while debug is off: each trace point passes its details as
+a function that is only called once the namespace is enabled.
+
+Note that the two print at different console levels. JsSIP's trace uses
+`debug`'s own output function, which is `console.debug` - Chrome files that
+under the **Verbose** level and hides it unless the console's level filter
+includes it. libwebphone's own namespaces override that to `console.log`, so
+they are visible at the default level like the event log above.
+
+Both namespaces can also be enabled from construction rather than by calling
+this afterwards, which is how to catch the very first moments of a session -
+the `debug` configuration below runs `startDebug()` before the user agent is
+built, so nothing that happens on the way up is missed:
+
+```js
+const webphone = new libwebphone({ userAgent: { debug: true } });
+```
+
+> Setting `localStorage.debug` by hand does not survive construction. Where
+> `debug` is false - the default - the constructor calls
+> [stopDebug()](#stopdebug), and `debug`'s own `enable("")` removes the key
+> rather than just ignoring it. Use the configuration above instead.
+
 #### stopDebug()
 
 Configures the instance to stop logging debug information on the console.
