@@ -176,7 +176,7 @@ The filename becomes the ringtone's id and display name automatically (`marimba-
 | ring09.wav | 2.4s | 8 pulses, jumping 444/889/667Hz | Melodic Pulse |
 | ring10.wav | 1.8s | 5 pulses, ascending run 533-1143Hz | Ascending Run |
 | ring11.wav | 2.3s | 6 pulses, bouncing 444-667Hz | Bouncing Trill |
-| ring12.wav | 2.4s | 1 pulse, noisy/non-tonal, low wandering pitch | X |
+| ring12.wav | 2.4s | 1 pulse, noisy/non-tonal, low wandering pitch | Ember |
 
 ### Adding new ringtones
 

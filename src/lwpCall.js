@@ -215,6 +215,35 @@ export default class {
     return "originating";
   }
 
+  /**
+   * The raw Alert-Info header value(s) from the INVITE, in the order they
+   * appeared - `["<alert-internal>"]` for a call the platform marked as
+   * internal. Empty for an outbound call, or an inbound one without the
+   * header.
+   *
+   * JsSIP has no grammar rule for Alert-Info, so it is stored unparsed
+   * (Parser.js falls through to addHeader()) and comes back exactly as it was
+   * on the wire, brackets and all. lwpAudioContext matches these against its
+   * configured ringtone mappings - see getRingtoneForAlertInfo().
+   */
+  getAlertInfo() {
+    const session = this._getSession();
+    const request = session ? session._request : null;
+
+    if (!request) {
+      return [];
+    }
+
+    // Both JsSIP request shapes implement this - OutgoingRequest for a call we
+    // placed, IncomingMessage for one we received - so the check is only
+    // against _request being something else entirely.
+    if (typeof request.getHeaders != "function") {
+      return [];
+    }
+
+    return request.getHeaders("Alert-Info");
+  }
+
   localIdentity(details = false) {
     const session = this._getSession();
     if (session) {
@@ -778,6 +807,7 @@ export default class {
       direction: direction,
       terminating: direction == "terminating",
       originating: direction == "originating",
+      alertInfo: this.getAlertInfo(),
       localIdentity: this.localIdentity(),
       remoteIdentity: this.remoteIdentity(),
       remoteIdentityOverride: this.remoteIdentityOverride(),

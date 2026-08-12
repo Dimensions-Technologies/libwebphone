@@ -6,7 +6,29 @@ The libwebphone audio context class contains all the functionality related to th
 
 Ringing audio is a bundled WAV ringtone (see `channels.ringer.files`, selected via `selectRingtone()`), decoded once into an `AudioBuffer` and played through the AudioContext graph as a looping `AudioBufferSourceNode` for the duration of the ring. Routing it through the graph is what makes a click-free stop possible: the fade is scheduled on the audio clock and interpolated per sample by the audio thread, which no JS-timer-driven fade on an `<audio>` element can match. Looping is likewise sample-accurate, so there is no seam. Nothing oscillates in the background between rings - the source node is created per ring and discarded after it stops.
 
-Only the currently selected ringtone (plus whatever is being previewed) is kept decoded; `decodeAudioData` resamples to the context's rate, so holding all of `channels.ringer.files` decoded would cost several megabytes.
+An inbound call can ring with a different ringtone to the selected one, chosen by the `Alert-Info` header on its INVITE - see [Alert-Info ringtones](#alert-info-ringtones) below.
+
+Only the ringtones that are actually reachable are kept decoded - the selected one, whatever is being previewed, the ring in progress along with any calls queued behind it, and (while `channels.ringer.alertInfo.prewarm` is on) the ringtones the Alert-Info mappings point at. `decodeAudioData` resamples to the context's rate, so holding all of `channels.ringer.files` decoded would cost several megabytes.
+
+### Alert-Info ringtones
+
+A platform can mark an inbound call by putting an `Alert-Info` header on the INVITE, which is how a phone knows to ring differently for, say, an internal call than an external one:
+
+```
+Alert-Info: <alert-internal>
+```
+
+`channels.ringer.alertInfo.mappings` maps those header values to ringtones. Two keys are configured out of the box - `alert-internal` and `alert-external` - and a host application can add any others it needs (a door phone, a hotline) at runtime with [setAlertInfoRingtone()](#setalertinforingtonekey-ringtoneid). A mapping left unset falls back to the selected ringtone, so a mapping only has to be filled in where a distinct ringtone is actually wanted.
+
+Keys are stored without the `<>` a SIP header wraps them in, and matched case-insensitively, so `alert-internal`, `<alert-internal>` and `<ALERT-INTERNAL>` are all the same mapping.
+
+The default `matchMode` of `"token"` matches a key as a whole word anywhere in the header value. That covers the bare form above as well as the URI forms other platforms send (`<http://pbx/alert-internal>`, `<sip:x@pbx>;info=alert-internal`), while keeping `alert-internal` distinct from `alert-internal-2` - hyphens and underscores count as part of a word rather than as boundaries. `"exact"` compares the whole value instead, after stripping the surrounding `<>`. Where neither fits, `channels.ringer.alertInfo.matcher` replaces the matching entirely.
+
+Mappings are matched in order, built-in keys first, and the first key matching any of the call's `Alert-Info` values wins - so a call carrying two headers is decided by mapping order, not header order.
+
+Where two calls ring at once each keeps its own ringtone, but only one is audible: the ringer follows the call at the front of the ring queue, so a call arriving behind one that is already ringing is heard - with its own mapped ringtone - only once the call ahead of it is answered or cleared. See [startRinging()](#startringingrequestid-ringtoneid).
+
+> **The library does not persist these mappings.** They live in the instance's config for its lifetime only. A host application that lets users customise them is responsible for storing them and passing them back in via `channels.ringer.alertInfo.mappings` when it constructs libwebphone - the same division of responsibility as `channels.ringer.selected`.
 
 There is no `<audio>` element fallback: ringing requires the AudioContext to be running. Since browsers keep it suspended until the user interacts with the page, this class registers a one-shot `click`/`touchend`/`keydown` listener on `document` and resumes the context on the first interaction anywhere in the app - see [startAudioContext()](#startaudiocontext). If a ring is nonetheless attempted before that happens, `audioContext.ringtone.play.error` is emitted rather than failing silently.
 
@@ -251,18 +273,36 @@ the number 1 key would be:
 playTones(1209, 697);
 ```
 
-#### startRinging(requestId)
+#### startRinging(requestId, ringtoneId)
 
 When ringing is required this function will start the ringing audio. The provide
 request id, or null, will be pushed to an array and ringing will continue until
 that array is empty. This allows multiple calls or other functions to request
 ringing start and end without causing overlapping ringing tones.
 
-| Name      | Type   | Default | Description                                            |
-| --------- | ------ | ------- | ------------------------------------------------------ |
-| requestId | string | null    | The reference / request id that requires ringing audio |
+| Name       | Type   | Default | Description                                                                                    |
+| ---------- | ------ | ------- | ------------------------------------------------------------------------------------------------ |
+| requestId  | string | null    | The reference / request id that requires ringing audio                                         |
+| ringtoneId | string | null    | Ring with this ringtone instead of the selected one. Ignored if it isn't an entry in `channels.ringer.files` |
 
 > The request id is optional, but its good practice to use the call id.
+
+> The array of requestors is a **queue**, and the request at the front of it
+> owns the ringer. A second call arriving while the first is still ringing
+> does not swap the ringtone under it, whatever its own `Alert-Info` says —
+> it waits, and is heard only once the calls ahead of it have called
+> [stopRinging()](#stopringingrequestid). This is how a desk phone behaves:
+> the second call's distinctive ringtone starts when the first is answered or
+> cleared, not while it's still ringing.
+
+> Each request's ringtone is settled **as it arrives**, not as it reaches the
+> front of the queue, so a [selectRingtone()](#selectringtoneid) while a call
+> waits its turn doesn't change what that call ends up ringing with — it
+> takes effect from the next ring, as it does mid-ring. The
+> `call.ringing.started` handler fills `ringtoneId` in from the call's
+> `Alert-Info` header (see [getRingtoneForAlertInfo()](#getringtoneforalertinfoalertinfo));
+> a host application calling `startRinging()` by hand gets the selected
+> ringtone unless it passes one.
 
 Ringtones play as decoded `AudioBuffer`s through the Web Audio graph
 (`AudioBufferSourceNode -> envelope gain -> ringerGain -> masterGain`), which
@@ -291,6 +331,14 @@ requestors. If the array is empty after this operation, stop all ringing audio.
 | Name      | Type   | Default | Description                                            |
 | --------- | ------ | ------- | ------------------------------------------------------ |
 | requestId | string | null    | The reference / request id that requires ringing audio |
+
+> If other requests are still waiting, the one now at the front of the queue
+> takes the ringer over. Where it settled on a different ringtone — the usual
+> case being an `alert-internal` call clearing while an `alert-external` one
+> waits behind it — the ringing audio switches to that ringtone, fading the
+> outgoing one out as [stopAllRinging()](#stopallringing) does rather than
+> cutting it off. Removing a request that wasn't at the front changes nothing
+> audible.
 
 #### stopAllRinging()
 
@@ -347,7 +395,80 @@ Changes which ringtone will be used the next time ringing starts.
 > responsible for remembering the user's choice (e.g. in its own storage)
 > and re-applying it (via config or this method) on future sessions.
 
-#### previewRingtone(id)
+#### getAlertInfoMappings()
+
+Returns the Alert-Info ringtone mappings, in the order they are matched against an incoming call - built-in keys first (see [Alert-Info ringtones](#alert-info-ringtones)).
+
+Return:
+
+| Type  | Description                                                                                                                                    |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| array | `[{ key: string, ringtone: string\|null, builtin: boolean }, ...]`. A null `ringtone` means the mapping is unset and falls back to the selected ringtone; `builtin` marks the platform keys, which cannot be removed |
+
+#### getAlertInfoRingtone(key)
+
+Returns the ringtone id mapped to `key`, or null where the mapping is unset or doesn't exist - the two behave identically when a call arrives.
+
+| Name | Type   | Default | Description                                                                     |
+| ---- | ------ | ------- | --------------------------------------------------------------------------------- |
+| key  | string |         | An Alert-Info value, with or without the surrounding `<>`, in any case          |
+
+Return:
+
+| Type          | Description                                                                                                                          |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| string / null | The mapped ringtone id, or null where the mapping is unset, doesn't exist, or the key itself is unusable. Use [getRingtoneForAlertInfo()](#getringtoneforalertinfoalertinfo) for what a call would actually ring with, which resolves null to the selected ringtone |
+
+#### setAlertInfoRingtone(key, ringtoneId)
+
+Maps an Alert-Info value to a ringtone, adding the mapping if it is new. This is how a host application adds a customer's own mapping (a door phone, for example) at runtime.
+
+| Name       | Type   | Default | Description                                                                                        |
+| ---------- | ------ | ------- | ---------------------------------------------------------------------------------------------------- |
+| key        | string |         | An Alert-Info value, with or without the surrounding `<>`. Stored lowercased and unwrapped         |
+| ringtoneId | string | null    | The id of an entry in `channels.ringer.files`, or null to clear the mapping back to the selected ringtone |
+
+> Ignored if `key` is empty or the literal `__proto__` (which no plain JavaScript object can hold as an ordinary key, so the mapping could never exist), or if `ringtoneId` is given but doesn't resolve to an entry in `channels.ringer.files` - an id that will never play is a mistake, unlike an intentionally unset mapping. Clearing a mapping does **not** remove it: the built-in rows have to stay in the UI to be re-filled, and [removeAlertInfoMapping()](#removealertinfomappingkey) is how a custom one is deleted. If a call is currently ringing, the change does not interrupt it.
+
+Return:
+
+| Type    | Description                                                                                                                                    |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| boolean | False where the call was **refused** for one of the reasons above, so a UI can report a bad input. Asking for a mapping that is already exactly that is true, not false - it changed nothing, but nothing was wrong with it |
+
+#### removeAlertInfoMapping(key)
+
+Removes a custom mapping entirely.
+
+| Name | Type   | Default | Description                     |
+| ---- | ------ | ------- | ---------------------------------- |
+| key  | string |         | The Alert-Info value to remove  |
+
+> Ignored for the built-in platform keys - they are fixed rows in the UI. Clear one with `setAlertInfoRingtone(key, null)` instead.
+
+Return:
+
+| Type    | Description                                                                                                                              |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| boolean | False where the removal was **refused** - an unusable key, or a built-in one. A key that simply isn't mapped is true: the caller asked for no mapping under it, and that is the state they get |
+
+#### getRingtoneForAlertInfo(alertInfo)
+
+Resolves the ringtone an inbound call carrying these `Alert-Info` header values should ring with. This is what the `call.ringing.started` handler passes to [startRinging()](#startringingrequestid-ringtoneid), and it is exposed so a host application can show which ringtone a call will use (or would have used) without starting one.
+
+| Name      | Type  | Default | Description                                                                                                 |
+| --------- | ----- | ------- | ------------------------------------------------------------------------------------------------------------- |
+| alertInfo | array | `[]`    | The raw header values, as [lwpCall.getAlertInfo()](/docs/lwpCall.md#getalertinfo) returns them. A single string is accepted too |
+
+Return:
+
+| Type   | Description                                                                                                                                      |
+| ------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| string | A ringtone id. Always something playable: an unmatched call, an unset mapping, a mapping pointing at a ringtone that no longer exists, and `channels.ringer.alertInfo.enabled` being false all resolve to `channels.ringer.selected` |
+
+> This never throws, including when a `channels.ringer.alertInfo.matcher` does - a failure there is reported as `audioContext.channel.ringer.alertinfo.error` and resolves to the selected ringtone. Nothing about deciding a ringtone is allowed to stop a call ringing.
+
+#### previewRingtone(id, source)
 
 Plays a ringtone, looping, so it can be auditioned outside of an actual call,
 using a playback path entirely separate from real ringing so it can never
@@ -355,9 +476,10 @@ interfere with (or be interfered with by) an actual ring. Automatically stops
 after `channels.ringer.previewDuration` seconds if not stopped first.
 Starting a real ring (`startRinging()`) also stops any active preview.
 
-| Name | Type   | Default                        | Description                                                    |
-| ---- | ------ | ------------------------------- | --------------------------------------------------------------- |
-| id   | string | `channels.ringer.selected`     | The id of an entry in `channels.ringer.files`                  |
+| Name   | Type   | Default                        | Description                                                    |
+| ------ | ------ | ------------------------------- | --------------------------------------------------------------- |
+| id     | string | `channels.ringer.selected`     | The id of an entry in `channels.ringer.files`                  |
+| source | any    | null                            | Which control owns this preview - see [Preview ownership](#preview-ownership) |
 
 > If the AudioContext can't be resumed (e.g. autoplay policy) or the ringtone
 > fails to decode, the preview is
@@ -365,24 +487,94 @@ Starting a real ring (`startRinging()`) also stops any active preview.
 > `audioContext.ringtone.preview.error` is emitted, so `isRingtonePreviewActive()`
 > and the render state never claim a preview is playing when it isn't.
 
+##### Preview ownership
+
+There is only ever **one** preview playing, but a UI usually has several
+buttons that can start one - the ringtone selector, one per Alert-Info mapping
+row, and whatever a host application adds. So a preview records *which control
+started it*, not just which ringtone is playing, and each control asks about
+its own:
+
+```js
+// each button passes a token of its own - any value, compared with ===
+audioContext.toggleRingtonePreview(ringtoneId, "internal-button");
+
+// ...and renders from the same token
+button.textContent = audioContext.isRingtonePreviewActive("internal-button")
+  ? "Stop"
+  : "Preview";
+```
+
+Without this, two buttons set to the same ringtone would both show "Stop" while
+only one of them is playing - the ringtone id can't tell them apart, and an
+unset Alert-Info mapping auditions the selected ringtone, so collisions are
+routine rather than a corner case.
+
+The token can be any value (a string, a DOM element, an object) since it is
+only ever compared with `===`. Three rules follow from that:
+
+- Pass the **same** token for every press of a given button, or it will never
+  recognise its own preview.
+- Pass a **distinct** token per button. `null` is the built-in ringtone
+  selector's token, and each Alert-Info row uses its normalised key
+  (`"alert-internal"`), so avoid those unless you mean to share a button's
+  identity with one of them.
+- Never use `undefined` as a token. Omitting the argument is how
+  [isRingtonePreviewActive()](#isringtonepreviewactivesource) is asked "is
+  *anything* playing", and a method call cannot tell an omitted argument from
+  an explicit `undefined` - so a token that hasn't been computed yet would
+  quietly answer the wrong question. Where a token can legitimately be absent,
+  compare [getRingtonePreviewSource()](#getringtonepreviewsource) instead.
+
+Ownership only decides what a control reports and what a press does; it does
+not reserve anything. Whoever starts a preview stops the one already playing,
+whatever owns it.
+
 #### stopRingtonePreview()
 
 Stops any ringtone currently being previewed, with the same fade-out as
 [stopAllRinging()](#stopallringing). The decoded buffer is released unless
-the previewed ringtone is also the selected one.
+something else still reaches it - it is also the selected ringtone, a ring in
+progress or a call queued behind it is using it, or it is one of the prewarmed
+Alert-Info mappings.
 
-#### toggleRingtonePreview(id)
+#### toggleRingtonePreview(id, source)
 
-If a preview is active, stops it; otherwise starts previewing `id` (see
-`previewRingtone`).
+The one call a preview button needs. Pressing the control that started the
+preview stops it; pressing a **different** one switches the preview to that
+control's ringtone rather than merely stopping the first. Every preview button
+in the default template is bound to this.
 
-#### isRingtonePreviewActive()
+| Name   | Type   | Default                        | Description                                                    |
+| ------ | ------ | ------------------------------- | --------------------------------------------------------------- |
+| id     | string | `channels.ringer.selected`     | The id of an entry in `channels.ringer.files`                  |
+| source | any    | null                            | The pressing control's token - see [Preview ownership](#preview-ownership). Pass the same value on every press of a given button |
+
+#### isRingtonePreviewActive(source)
+
+Whether a ringtone preview is playing - and, given a `source`, whether it is
+that control's own. This is what a preview button should ask to decide between
+showing "Preview" and "Stop" (see [Preview ownership](#preview-ownership)).
+
+| Name   | Type | Default | Description                                                                                                                              |
+| ------ | ---- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| source | any  |         | Omit for "is anything playing". Given a token, narrows to "is the preview playing the one this control started". `isRingtonePreviewActive(null)` asks about the ringtone selector's own preview specifically, **not** about any preview. Passing `undefined` is indistinguishable from omitting it, so never use `undefined` as a token (see [Preview ownership](#preview-ownership)) |
 
 Return:
 
-| Type    | Description                                    |
-| ------- | ----------------------------------------------- |
-| boolean | If true a ringtone preview is currently playing |
+| Type    | Description                                                                                          |
+| ------- | -------------------------------------------------------------------------------------------------- |
+| boolean | If true a ringtone preview is currently playing, and (where `source` was given) it belongs to it     |
+
+#### getRingtonePreviewSource()
+
+Which control owns the preview that is currently playing.
+
+Return:
+
+| Type | Description                                                                                                                                       |
+| ---- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| any  | The owning control's token: null for the ringtone selector, the normalised key for an Alert-Info mapping row, or whatever a host application passed. `undefined` when no preview is playing - which is how that case is told apart from the selector's null |
 
 #### isRinging()
 
@@ -511,6 +703,15 @@ Re-paint / update all render targets.
 | ringtone      | Ringtone       | Used to label the ringtone selection control element   |
 | ringtonepreview | Preview      | Label for the ringtone preview button when idle         |
 | ringtonepreviewstop | Stop    | Label for the ringtone preview button while previewing  |
+| alertinfointernal | Internal Call Ringtone | Used to label the ringtone selector for the `alert-internal` Alert-Info value |
+| alertinfoexternal | External Call Ringtone | Used to label the ringtone selector for the `alert-external` Alert-Info value |
+| alertinfocustom | Custom Alert-Info Ringtones | Used to label the section holding any further Alert-Info mappings |
+| alertinfoempty | No custom mappings yet | Shown in place of the mapping table while no custom mappings exist |
+| alertinfodefault | Use selected ringtone | The option shown for a mapping that is unset, and so uses the selected ringtone |
+| alertinfokey  | Alert-Info value | Names the input a new Alert-Info value is typed into (its placeholder and its accessible name), and heads the key column of the mapping table |
+| alertinfoinvalid | Enter a valid Alert-Info value | Shown against that input when the Add button rejects what is in it - an empty value, or one that cannot be used as a key |
+| alertinfoadd  | Add            | Label for the button that adds a new Alert-Info mapping                |
+| alertinforemove | Remove       | Label for the button that removes a custom Alert-Info mapping          |
 | tonesvolume   | Tones Volume   | Used to label the DTMF (tones) volume control element  |
 | previewvolume | Preview Volume | Used to label the preview volume control element       |
 | remotevolume  | Call Volume    | Used to label the remote (call) volume control element |
@@ -526,6 +727,13 @@ Re-paint / update all render targets.
 | channels.ringer.connectToMaster     | boolean  | true    | Connects `ringerGain` to `masterGain`, so the ringtone's volume is also scaled by the current master volume. **Leave this on:** `masterGain` is the only route to the ring output element, so setting it false does not merely unlink the two volumes, it disconnects the ringer from the output entirely and nothing is heard. (Same is true of `channels.preview.connectToMaster`; `remote` and `tones` have their own paths.) |
 | channels.ringer.files               | array    | see below | Selectable ringtones bundled with the library: `[{ id, name, dataUri }, ...]`, generated from `assets/sounds/*.wav` by `npm run ringtones:build`. Config is merged with lodash `merge`, which merges arrays by index rather than replacing them - a shorter custom `files` array supplied via config will not fully remove the bundled defaults, it merges element-by-element against them. To fully replace the list, override every index (i.e. supply an array at least as long as the default). The defaults are copied per instance, so doing this affects only the instance you pass it to |
 | channels.ringer.selected            | string   | `"ring01"` (falls back to the first entry in `channels.ringer.files` if that id isn't present) | Which ringtone is currently selected, by id. Change at runtime with `selectRingtone(id)`. Validated against `channels.ringer.files` on construction and on every `selectRingtone(id)` call, so this always resolves to a real bundled file |
+| channels.ringer.alertInfo.show      | boolean  | true    | Should the default template show the Alert-Info ringtone controls - the two platform selectors, any custom mappings and the row for adding one       |
+| channels.ringer.alertInfo.enabled   | boolean  | true    | Whether an inbound call's `Alert-Info` header is consulted at all. With this false every call rings with `channels.ringer.selected`, but the mappings remain readable and editable, so a host app can build its UI before switching the behaviour on |
+| channels.ringer.alertInfo.mappings  | object   | `{"alert-internal": null, "alert-external": null}` | Alert-Info value -> ringtone id, or null for "use the selected ringtone". An object rather than an array so a host app's config merges key-by-key (unlike `files` above, which lodash `merge` combines by index), and so key order gives a stable match precedence. Keys are lowercased and unwrapped of `<>` on construction; a mapping pointing at an id that isn't in `channels.ringer.files` is cleared to null. Edit at runtime with [setAlertInfoRingtone()](#setalertinforingtonekey-ringtoneid) - the library does not persist them |
+| channels.ringer.alertInfo.builtin   | array    | `["alert-internal", "alert-external"]` | The platform-defined keys. These always have a mapping row (added back if a config's `mappings` omits them), are always matched before any custom key, and cannot be removed - only cleared. The default template gives the two defaults their own labelled selectors; any further key added here renders in the custom list, minus its remove button |
+| channels.ringer.alertInfo.matchMode | string   | token   | How a key is matched against an `Alert-Info` value. `"token"` matches the key as a whole word anywhere in the value, covering both `<alert-internal>` and URI forms like `<sip:x@pbx>;info=alert-internal`, while keeping `alert-internal` distinct from `alert-internal-2`. `"exact"` compares the whole value, after stripping the surrounding `<>` |
+| channels.ringer.alertInfo.matcher   | function | null    | `(alertInfoValues, mappings) => key \| null`, replacing the matching above entirely. `alertInfoValues` arrives trimmed and lowercased, `mappings` is [getAlertInfoMappings()](#getalertinfomappings), and the returned key is normalised the same way a configured one is. A throw out of it is caught and treated as "no match" - the call rings with `channels.ringer.selected` and `audioContext.channel.ringer.alertinfo.error` is emitted, rather than the exception escaping into the ringing path |
+| channels.ringer.alertInfo.prewarm   | boolean  | true    | Decode the mapped ringtones up front, rather than making the first call that needs one wait on `decodeAudioData`. Costs roughly half a megabyte per *distinct* mapped ringtone, so it stays proportional to how many are actually configured. With this off a mapped ringtone is decoded on demand and released once the ring ends |
 | channels.ringer.previewDuration     | integer  | 8       | Seconds `previewRingtone()` plays before auto-stopping itself                                                                                        |
 | channels.ringer.fadeIn              | float    | 0.01    | Seconds the ringtone envelope ramps up over when ringing starts                                                                                      |
 | channels.ringer.fadeOut             | float    | 0.02    | Seconds the ringtone envelope ramps down over when ringing stops. This is a declick, not a stylistic fade - because the ramp is interpolated per sample by the audio thread it does not need to be long to be clean, and lengthening it just makes the stop audibly slow |
@@ -569,8 +777,11 @@ Re-paint / update all render targets.
 | audioContext.channel.master.volume    | volume (integer between 0 and 1) | Emitted when the master channel volume is updated                      |
 | audioContext.channel.ringer.volume    | volume (integer between 0 and 1) | Emitted when the ringer channel volume is updated                      |
 | audioContext.channel.ringer.selected  | id (string)                      | Emitted when selectRingtone() changes the selected ringtone            |
-| audioContext.ringtone.preview.started | id (string)                      | Emitted when previewRingtone() starts playing                          |
-| audioContext.ringtone.preview.stopped |                                  | Emitted when a ringtone preview stops (manually or via timeout)        |
+| audioContext.channel.ringer.alertinfo.changed | key (string), id (string or null) | Emitted when setAlertInfoRingtone() adds a mapping or changes one, including when it is cleared back to the selected ringtone (a null id). Not emitted where nothing actually changed |
+| audioContext.channel.ringer.alertinfo.removed | key (string)                | Emitted when removeAlertInfoMapping() deletes a custom mapping         |
+| audioContext.channel.ringer.alertinfo.error | error                        | Emitted when resolving an inbound call's Alert-Info threw - in practice a `channels.ringer.alertInfo.matcher` that failed. The call still rings, with `channels.ringer.selected`; this is how an otherwise invisible fault in a host's own matching surfaces |
+| audioContext.ringtone.preview.started | id (string), source (any)        | Emitted when previewRingtone() starts playing. The second argument is the control that owns it (see [Preview ownership](#preview-ownership)), so a host application's own buttons can update from the event alone |
+| audioContext.ringtone.preview.stopped | source (any)                     | Emitted when a ringtone preview stops (manually or via timeout), carrying the control that owned the preview that just ended |
 | audioContext.ringtone.play.error      | error, sink info (object)        | Emitted when startRinging() cannot play: either the AudioContext was not running (typically the browser's autoplay policy, still awaiting a user gesture) or the ringtone failed to decode - the Error message says which. The ring session itself is unaffected, this is purely informational, and if the context does resume later the ring is started then (see startAudioContext()). The second argument is [getOutputSinkInfo()](#getoutputsinkinfo), included so a failure to ring is diagnosable without a second round trip |
 | audioContext.sink.changed             | sink info (object)               | Emitted when ring output moves to a different device in **context** mode, carrying [getOutputSinkInfo()](#getoutputsinkinfo). Not emitted in element mode - there the device belongs to the element and `mediaDevices.ring.output.changed` is the event to watch |
 | audioContext.ring.output.secondary.enabled | enabled (boolean)           | Emitted when the [secondary ring output](#secondary-ring-output) path is switched on or off, which happens when the `ringoutput2` device selection moves to or away from `"none"` |
@@ -586,7 +797,7 @@ Re-paint / update all render targets.
 
 | Event                                   | Reason                                                                    |
 | --------------------------------------- | ------------------------------------------------------------------------- |
-| call.ringing.started                    | Invokes startRinging() with the call's id                                 |
+| call.ringing.started                    | Invokes startRinging() with the call's id, and with the ringtone its `Alert-Info` header maps to (see [Alert-Info ringtones](#alert-info-ringtones)). If resolving that ringtone throws, the call still rings - with `channels.ringer.selected` - and `audioContext.channel.ringer.alertinfo.error` is emitted |
 | call.ringing.stopped                    | Invokes stopRinging() with the call's id                                  |
 | call.primary.remote.audio.added         | Updates the remote source stream                                          |
 | call.primary.remote.mediaStream.connect | Updates the remote source stream                                          |

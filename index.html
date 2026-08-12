@@ -507,6 +507,90 @@
             color: var(--text-dim);
         }
 
+        /* Tabular lists inside a component (the Alert-Info ringtone mappings
+           are the only one today). Kept tag-shaped like the rules above,
+           since the library's templates carry no classes of their own. */
+        /* Auto layout, deliberately: the actions column below sizes itself to
+           its buttons and the rest takes the slack, which fixed layout can't
+           do - it would size every column off the header row instead. */
+        .panel-column table {
+            width: 100%;
+            font-size: 12.5px;
+        }
+
+        .panel-column thead th {
+            font-size: 10.5px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-faint);
+            padding: 0 10px 6px 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .panel-column td,
+        .panel-column tbody th {
+            padding: 7px 10px 7px 0;
+            border-bottom: 1px solid var(--border);
+            vertical-align: middle;
+        }
+
+        .panel-column tbody tr:last-child td,
+        .panel-column tbody tr:last-child th {
+            border-bottom: none;
+        }
+
+        /* The key. A row header rather than a cell (it names the controls
+           beside it), so the alignment browsers give a <th> has to be undone.
+           Long enough to read, wrapped rather than stretching the row, and
+           monospaced because it's a literal header value. */
+        .panel-column tbody th {
+            text-align: left;
+            font-weight: 600;
+            color: var(--text-dim);
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            overflow-wrap: anywhere;
+        }
+
+        /* Actions column - sized to its buttons, everything else takes the
+           slack. */
+        .panel-column thead th:last-child,
+        .panel-column td:last-child {
+            width: 1%;
+            padding-right: 0;
+            white-space: nowrap;
+            text-align: right;
+        }
+
+        .panel-column td button + button {
+            margin-left: 6px;
+        }
+
+        /* Overrides the flex-row sizing above, which does nothing useful in a
+           table cell and would otherwise force the row wider than the panel. */
+        .panel-column td select {
+            width: 100%;
+            min-width: 0;
+        }
+
+        .panel-column fieldset p {
+            font-size: 12.5px;
+            color: var(--text-faint);
+        }
+
+        /* The "add a mapping" row, separated from the list above it. */
+        .panel-column fieldset table + div,
+        .panel-column fieldset p + div {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid var(--border);
+        }
+
+        .panel-column fieldset div input[type="text"] {
+            flex: 1;
+            min-width: 0;
+        }
+
         .panel-column fieldset {
             border: 1px solid var(--border);
             border-radius: 6px;
