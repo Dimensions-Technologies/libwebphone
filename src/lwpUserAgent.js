@@ -144,7 +144,12 @@ export default class extends lwpRenderer {
     startDebug() {
         this._debug = true;
 
-        JsSIP.debug.enable("JsSIP:*");
+        // libwebphone's own namespaces ride along with JsSIP's: they are
+        // loggers on this same debug instance (see lwpAudioContext's
+        // "libwebphone:callWaiting"), so the one toggle turns on both the SIP
+        // trace and the library's internal tracing, and they interleave in
+        // the console in the order things actually happened.
+        JsSIP.debug.enable("JsSIP:*,libwebphone:*");
 
         this._emit("debug.start", this);
     }
@@ -339,7 +344,8 @@ export default class extends lwpRenderer {
             debug_ignored_events: [
                 "timeupdate",
                 "render.rendered",
-                "durationchange"
+                "durationchange",
+                "call.primary.update"
             ]
         };
 

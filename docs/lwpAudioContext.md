@@ -8,7 +8,7 @@ Ringing audio is a bundled WAV ringtone (see `channels.ringer.files`, selected v
 
 An inbound call can ring with a different ringtone to the selected one, chosen by the `Alert-Info` header on its INVITE - see [Alert-Info ringtones](#alert-info-ringtones) below.
 
-Only the ringtones that are actually reachable are kept decoded - the selected one, whatever is being previewed, the ring in progress along with any calls queued behind it, and (while `channels.ringer.alertInfo.prewarm` is on) the ringtones the Alert-Info mappings point at. `decodeAudioData` resamples to the context's rate, so holding all of `channels.ringer.files` decoded would cost several megabytes.
+Only the ringtones that are actually reachable are kept decoded - the selected one, whatever is being previewed, the ring in progress along with any calls queued or waiting behind it, and (while `channels.ringer.alertInfo.prewarm` is on) the ringtones the Alert-Info mappings point at. `decodeAudioData` resamples to the context's rate, so holding all of `channels.ringer.files` decoded would cost several megabytes.
 
 ### Alert-Info ringtones
 
@@ -29,6 +29,58 @@ Mappings are matched in order, built-in keys first, and the first key matching a
 Where two calls ring at once each keeps its own ringtone, but only one is audible: the ringer follows the call at the front of the ring queue, so a call arriving behind one that is already ringing is heard - with its own mapped ringtone - only once the call ahead of it is answered or cleared. See [startRinging()](#startringingrequestid-ringtoneid).
 
 > **The library does not persist these mappings.** They live in the instance's config for its lifetime only. A host application that lets users customise them is responsible for storing them and passing them back in via `channels.ringer.alertInfo.mappings` when it constructs libwebphone - the same division of responsibility as `channels.ringer.selected`.
+
+### Call waiting tone
+
+A call arriving while another call is already **established** is not rung for. Ringing a full ringtone over the top of a conversation is unusable - it is loud, it is continuous, and it drowns out the party you are actually talking to. Instead the call is announced the way a desk phone announces one: a single short beep, repeated every `channels.ringer.callWaiting.interval` seconds (30 by default, configurable between 10 and 60) for as long as the call is waiting.
+
+Held calls count as established. Being on hold is still being on a call, and it is exactly the case the old behaviour handled worst - the ringtone would play over a call the user intended to come back to.
+
+Two calls ringing at once, with nothing established, is unchanged: neither is a call waiting situation, so they use the ring queue as before (see [startRinging()](#startringingrequestid-ringtoneid)).
+
+The beep is generated (an `OscillatorNode` shaped by a gain envelope) rather than decoded, since it is a single tone - there is nothing to load and nothing to keep warm.
+
+It plays out of the **speaker** - the `audiooutput` device, where call audio is - and not the ring output device or the [secondary ring output](#secondary-ring-output). The person it is for is already on a call and already wearing the headset; a beep sent to the ring device would be aimed at a room they are not listening to. It reaches that device the same way the DTMF tones do, over the `tonesDestinationStream`, and so is scaled by master volume (mirrored onto the element) but not by the ringer volume.
+
+It has its own gain node rather than being connected to `tonesGain`, so the DTMF feedback volume - 0.15 by default - doesn't scale it, and turning keypress feedback down doesn't silence the call waiting tone with it. `channels.ringer.callWaiting.volume` sets its level independently.
+
+Which of the two treatments a call gets is re-decided whenever the calls around it change, not only when it arrives:
+
+- the established call clears while the waiting call is still ringing -> the waiting call takes the ringer over and rings properly, with the ringtone its own `Alert-Info` settled on when it arrived
+- a call becomes established while another is still ringing (answering an outbound call placed during an inbound one) -> the ringing call drops to the beep
+
+Only one cycle runs however many calls are waiting - three waiting calls are one beep every interval, not three. A call arriving behind one that is already waiting is beeped for as it arrives rather than waiting out the interval in progress.
+
+`channels.ringer.callWaiting.enabled` turns the tone off, and [setCallWaitingEnabled()](#setcallwaitingenabledenabled) does the same at runtime. With it off a second call is presented **silently** - it still appears in the call list and can be answered, it simply makes no sound. It does not fall back to ringing over the active call; that is the behaviour this replaces. Toggling it mid-call takes effect immediately, on a call already waiting.
+
+#### Tracing the call waiting tone
+
+Debug mode traces every routing decision, queue change and beep to the console, alongside the SIP trace:
+
+```js
+webphone.getUserAgent().startDebug();   // stopDebug() turns both back off
+```
+
+The trace is a namespaced [debug](https://www.npmjs.com/package/debug) logger, `libwebphone:callWaiting`, created on the same `debug` instance JsSIP uses - so it prints in the same styled `namespace message` form as `JsSIP:Transport`, the one toggle owns both, and the two interleave in the console in the order things actually happened.
+
+> It is written with `console.log`, deliberately overriding `debug`'s own `console.debug`. Chrome files `console.debug` under the **Verbose** log level and hides it by default, so JsSIP's own trace only appears once that level is enabled in the console's filter - this one does not depend on it. If the trace still doesn't appear, `getAudioContext().isCallWaitingDebug()` says whether the namespace is actually enabled, which separates "not logging" from "not visible". To have it on before the first call can arrive, enable it at construction rather than calling `startDebug()` afterwards:
+
+```js
+const webphone = new libwebphone({ userAgent: { debug: true } });
+```
+
+The trace answers the two questions a silent call waiting tone raises, in order:
+
+- **Did the call get here, and how was it routed?** `call.created` and `call.ringing.started` mark arrival; `shouldWait` shows the decision along with every other call it was based on (session, established, held, ended), so a wrong decision names the call that caused it.
+- **Was a beep actually produced, and could it be heard?** `cycle.start`/`beep.scheduled`/`beep.played` track the cycle, and `beep.played` carries the output path with it - the AudioContext state, and whether the `audiooutput` element is playing, muted, and still carrying the tones stream. A beep that is scheduled onto a paused or re-pointed element is silence the scheduling side cannot otherwise see.
+
+`beep.dropped`, `beep.failed` and `beep.timer.stale` name the three ways a beep is skipped: superseded while the context resumed, the context not running, and the cycle having stopped before the timer fired.
+
+[getCallWaitingDiagnostics()](#getcallwaitingdiagnostics) returns the same picture as a single object, for reading back at the moment something is wrong. It does not depend on the trace being on.
+
+> **Cost with debug off is a boolean read.** Every trace point passes its details as a function rather than an object, and that function is only called once the logger is enabled - so with debug off nothing walks the call list, maps a queue or reads an element's state. Nothing is polled or timed either: the trace only ever describes work the library was doing anyway.
+
+> As with the ringtone selection and the Alert-Info mappings, **the library does not persist the toggle or the interval.** A host application that lets users change them is responsible for storing them and passing them back in via `channels.ringer.callWaiting` when it constructs libwebphone.
 
 There is no `<audio>` element fallback: ringing requires the AudioContext to be running. Since browsers keep it suspended until the user interacts with the page, this class registers a one-shot `click`/`touchend`/`keydown` listener on `document` and resumes the context on the first interaction anywhere in the app - see [startAudioContext()](#startaudiocontext). If a ring is nonetheless attempted before that happens, `audioContext.ringtone.play.error` is emitted rather than failing silently.
 
@@ -362,6 +414,105 @@ the graph.
 A ring cancelled before it becomes audible (stopped while the AudioContext
 resume or the ringtone decode is still pending) is dropped rather than
 starting afterwards.
+
+#### startCallWaiting(requestId, ringtoneId)
+
+The call waiting counterpart of [startRinging()](#startringingrequestid-ringtoneid): registers a call as waiting instead of ringing, and starts the beep cycle if it isn't already running. See [Call waiting tone](#call-waiting-tone).
+
+| Name       | Type   | Default | Description                                                                                                 |
+| ---------- | ------ | ------- | ----------------------------------------------------------------------------------------------------------- |
+| requestId  | string | null    | The reference / request id that is waiting - use the call id                                                 |
+| ringtoneId | string | null    | The ringtone this call would have rung with. Remembered, not used, for the case below                        |
+
+`ringtoneId` is remembered rather than played: a waiting call takes the ringer over if the call it was waiting behind clears while it is still ringing, and it should then ring with the ringtone its own `Alert-Info` settled on when it arrived, not with whatever is selected by then.
+
+Unlike the ring queue this list has no front and no owner - one beep cycle covers however many calls are waiting. A call added while the cycle is already running is beeped for immediately rather than waiting out the interval in progress; a call that is already waiting is ignored.
+
+Beeping is subject to `channels.ringer.callWaiting.enabled`. With that off the call is still registered as waiting - so [isCallWaiting()](#iscallwaiting) is true, and the switch to a full ringtone if the established call clears still happens - it is simply presented silently.
+
+> **Requires a running AudioContext**, like ringing, and for the same reason - there is no `<audio>` element path. If the context can't be resumed, `audioContext.callwaiting.tone.error` is emitted and the beep is skipped; the next one in the cycle tries again.
+
+#### stopCallWaiting(requestId)
+
+Removes a request from the waiting list, stopping the beep cycle if it was the last one. A request that isn't waiting is ignored, which is why `call.ringing.stopped` can simply call this and [stopRinging()](#stopringingrequestid) without knowing which of the two the call ended up on.
+
+| Name      | Type   | Default | Description                                    |
+| --------- | ------ | ------- | ---------------------------------------------- |
+| requestId | string | null    | The reference / request id that was waiting    |
+
+A beep already sounding when the last waiting call is answered finishes - it is a quarter of a second long and self-terminating, so there is nothing to fade. What is prevented is a beep that was still waiting on the AudioContext to resume arriving after the fact.
+
+#### stopAllCallWaiting()
+
+Drops every waiting call and stops the beep cycle.
+
+Deliberately **not** part of [stopAllRinging()](#stopallringing): with a call waiting behind an established one the ring queue is normally empty, so stopping ringing must not take the beeps with it.
+
+#### isCallWaiting()
+
+Return:
+
+| Type    | Description                                                                                                          |
+| ------- | -------------------------------------------------------------------------------------------------------------------- |
+| boolean | True while any call is waiting, whether or not the tone itself is enabled - a call presented silently is still waiting |
+
+#### isCallWaitingEnabled()
+
+Return:
+
+| Type    | Description                                                 |
+| ------- | ----------------------------------------------------------- |
+| boolean | The current value of `channels.ringer.callWaiting.enabled`  |
+
+#### setCallWaitingEnabled(enabled)
+
+Turns the call waiting tone on or off.
+
+| Name    | Type    | Default | Description                            |
+| ------- | ------- | ------- | -------------------------------------- |
+| enabled | boolean |         | Whether the call waiting tone sounds   |
+
+Takes effect immediately, including on a call already waiting: switching it on mid-call starts the beeps, switching it off silences them and leaves the call presented silently. Emits `audioContext.channel.ringer.callwaiting.enabled` and re-renders. Setting it to what it already is does nothing.
+
+#### toggleCallWaiting()
+
+Inverts [isCallWaitingEnabled()](#iscallwaitingenabled) via [setCallWaitingEnabled()](#setcallwaitingenabledenabled).
+
+#### getCallWaitingInterval()
+
+Return:
+
+| Type   | Description                                                 |
+| ------ | ----------------------------------------------------------- |
+| number | Seconds between beeps - `channels.ringer.callWaiting.interval` |
+
+#### setCallWaitingInterval(seconds)
+
+Sets the interval between beeps.
+
+| Name    | Type   | Default | Description               |
+| ------- | ------ | ------- | ------------------------- |
+| seconds | number |         | Seconds between beeps     |
+
+Clamped into `[channels.ringer.callWaiting.intervalMin, channels.ringer.callWaiting.intervalMax]` (10 to 60 by default) rather than rejected, so a value straight out of a number input can be passed through; a value that isn't a number at all leaves the interval alone. Emits `audioContext.channel.ringer.callwaiting.interval` with the value actually applied, and re-renders.
+
+Changing it while calls are waiting re-times the **next** beep from now - the cycle isn't restarted, since that would beep again on every step of a slider.
+
+#### isCallWaitingDebug()
+
+Return:
+
+| Type    | Description                                                                                                    |
+| ------- | -------------------------------------------------------------------------------------------------------------- |
+| boolean | Whether the `libwebphone:callWaiting` trace is currently being logged - see [Tracing the call waiting tone](#tracing-the-call-waiting-tone) |
+
+There is no setter: the trace belongs to debug mode, which [lwpUserAgent](lwpUserAgent.md)'s `startDebug()` / `stopDebug()` own.
+
+#### getCallWaitingDiagnostics()
+
+Everything that decides whether a beep is heard, as one object: the queue state (`waiting`, `toneActive`, `timerArmed`, `ringQueue`, `ringerConnected`), the calls the routing decision reads (`calls`, each with `hasSession`/`ringing`/`established`/`held`/`ended`/`primary`), and the output path the beep is scheduled onto (`output`: the AudioContext state, the call waiting gain, and the `audiooutput` element's paused/muted/volume/stream/sink).
+
+Safe to call at any time and independent of the debug flag. Intended use is to call it at the moment something is wrong and read it back.
 
 #### getRingtones()
 
@@ -700,9 +851,13 @@ Re-paint / update all render targets.
 | ------------- | -------------- | ------------------------------------------------------ |
 | mastervolume  | Master Volume  | Used to label the master volume control element        |
 | ringervolume  | Ringer Volume  | Used to label the ringing volume control element       |
+| ringtonesection | Ringtones    | Used to label the section holding the ringtone selector and the Alert-Info ringtones |
 | ringtone      | Ringtone       | Used to label the ringtone selection control element   |
 | ringtonepreview | Preview      | Label for the ringtone preview button when idle         |
 | ringtonepreviewstop | Stop    | Label for the ringtone preview button while previewing  |
+| callwaitingsection | Call Waiting | Used to label the section holding the call waiting tone controls |
+| callwaiting   | Call Waiting Tone | Used to label the checkbox that enables/disables the call waiting tone |
+| callwaitinginterval | Call Waiting Tone Interval (seconds) | Used to label the input that sets the seconds between call waiting beeps |
 | alertinfointernal | Internal Call Ringtone | Used to label the ringtone selector for the `alert-internal` Alert-Info value |
 | alertinfoexternal | External Call Ringtone | Used to label the ringtone selector for the `alert-external` Alert-Info value |
 | alertinfocustom | Custom Alert-Info Ringtones | Used to label the section holding any further Alert-Info mappings |
@@ -722,18 +877,30 @@ Re-paint / update all render targets.
 | ----------------------------------- | -------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | channels.master.show                | boolean  | true    | Should the default template show the master volume control                                                                                           |
 | channels.master.volume              | float    | 1.0     | The initial volume of the master audio, where 0 is muted and 1 is 100%                                                                               |
-| channels.ringer.show                | boolean  | true    | Should the default template show the ringer controls - the ringing volume control, the ringtone selector and the ringtone preview button             |
+| channels.ringer.show                | boolean  | true    | Should the default template show the ringing volume control. The ringtone selector has its own flag (`channels.ringer.ringtones.show`) rather than this one, since the two sit in different [sections](#sections) |
 | channels.ringer.volume              | float    | 1.0     | The initial volume of the ringing audio, where 0 is muted and 1 is 100%                                                                              |
 | channels.ringer.connectToMaster     | boolean  | true    | Connects `ringerGain` to `masterGain`, so the ringtone's volume is also scaled by the current master volume. **Leave this on:** `masterGain` is the only route to the ring output element, so setting it false does not merely unlink the two volumes, it disconnects the ringer from the output entirely and nothing is heard. (Same is true of `channels.preview.connectToMaster`; `remote` and `tones` have their own paths.) |
 | channels.ringer.files               | array    | see below | Selectable ringtones bundled with the library: `[{ id, name, dataUri }, ...]`, generated from `assets/sounds/*.wav` by `npm run ringtones:build`. Config is merged with lodash `merge`, which merges arrays by index rather than replacing them - a shorter custom `files` array supplied via config will not fully remove the bundled defaults, it merges element-by-element against them. To fully replace the list, override every index (i.e. supply an array at least as long as the default). The defaults are copied per instance, so doing this affects only the instance you pass it to |
 | channels.ringer.selected            | string   | `"ring01"` (falls back to the first entry in `channels.ringer.files` if that id isn't present) | Which ringtone is currently selected, by id. Change at runtime with `selectRingtone(id)`. Validated against `channels.ringer.files` on construction and on every `selectRingtone(id)` call, so this always resolves to a real bundled file |
-| channels.ringer.alertInfo.show      | boolean  | true    | Should the default template show the Alert-Info ringtone controls - the two platform selectors, any custom mappings and the row for adding one       |
+| channels.ringer.ringtones.show      | boolean  | true    | Should the default template show the [ringtones section](#sections) - the ringtone selector, its preview button and, subject to the flag below, the Alert-Info controls. Only relevant to a target rendering the whole template: one that names a `section` has already said which it wants |
+| channels.ringer.alertInfo.show      | boolean  | true    | Should the default template show the Alert-Info ringtone controls - the two platform selectors, any custom mappings and the row for adding one. These render inside the ringtones section, below the ringtone selector, so `channels.ringer.ringtones.show` hides them along with it |
 | channels.ringer.alertInfo.enabled   | boolean  | true    | Whether an inbound call's `Alert-Info` header is consulted at all. With this false every call rings with `channels.ringer.selected`, but the mappings remain readable and editable, so a host app can build its UI before switching the behaviour on |
 | channels.ringer.alertInfo.mappings  | object   | `{"alert-internal": null, "alert-external": null}` | Alert-Info value -> ringtone id, or null for "use the selected ringtone". An object rather than an array so a host app's config merges key-by-key (unlike `files` above, which lodash `merge` combines by index), and so key order gives a stable match precedence. Keys are lowercased and unwrapped of `<>` on construction; a mapping pointing at an id that isn't in `channels.ringer.files` is cleared to null. Edit at runtime with [setAlertInfoRingtone()](#setalertinforingtonekey-ringtoneid) - the library does not persist them |
 | channels.ringer.alertInfo.builtin   | array    | `["alert-internal", "alert-external"]` | The platform-defined keys. These always have a mapping row (added back if a config's `mappings` omits them), are always matched before any custom key, and cannot be removed - only cleared. The default template gives the two defaults their own labelled selectors; any further key added here renders in the custom list, minus its remove button |
 | channels.ringer.alertInfo.matchMode | string   | token   | How a key is matched against an `Alert-Info` value. `"token"` matches the key as a whole word anywhere in the value, covering both `<alert-internal>` and URI forms like `<sip:x@pbx>;info=alert-internal`, while keeping `alert-internal` distinct from `alert-internal-2`. `"exact"` compares the whole value, after stripping the surrounding `<>` |
 | channels.ringer.alertInfo.matcher   | function | null    | `(alertInfoValues, mappings) => key \| null`, replacing the matching above entirely. `alertInfoValues` arrives trimmed and lowercased, `mappings` is [getAlertInfoMappings()](#getalertinfomappings), and the returned key is normalised the same way a configured one is. A throw out of it is caught and treated as "no match" - the call rings with `channels.ringer.selected` and `audioContext.channel.ringer.alertinfo.error` is emitted, rather than the exception escaping into the ringing path |
 | channels.ringer.alertInfo.prewarm   | boolean  | true    | Decode the mapped ringtones up front, rather than making the first call that needs one wait on `decodeAudioData`. Costs roughly half a megabyte per *distinct* mapped ringtone, so it stays proportional to how many are actually configured. With this off a mapped ringtone is decoded on demand and released once the ring ends |
+| channels.ringer.callWaiting.show    | boolean  | true    | Should the default template show the [call waiting section](#sections) - the enable checkbox and, while enabled, the interval input                  |
+| channels.ringer.callWaiting.enabled | boolean  | true    | Whether a call arriving while another is established is announced with the [call waiting tone](#call-waiting-tone). With this false that call is presented **silently** - it does not fall back to ringing over the established call. Change at runtime with [setCallWaitingEnabled()](#setcallwaitingenabledenabled) |
+| channels.ringer.callWaiting.interval | integer | 30      | Seconds between call waiting beeps. Clamped into `[intervalMin, intervalMax]` on construction and on every [setCallWaitingInterval()](#setcallwaitingintervalseconds) |
+| channels.ringer.callWaiting.intervalMin | integer | 10   | The shortest interval that can be set. Raise or lower it to widen the range a host application's UI offers                                            |
+| channels.ringer.callWaiting.intervalMax | integer | 60   | The longest interval that can be set                                                                                                                 |
+| channels.ringer.callWaiting.volume  | float    | 0.4    | The level of the beep on the speaker (`audiooutput`) device. Master volume still applies on top; the ringer volume does not, since the beep does not go to the ring output. Well below full scale because it plays into a headset someone is already holding a conversation on - for reference the DTMF feedback tones on the same device sit at 0.15, and those are not competing with anything |
+| channels.ringer.callWaiting.frequency | integer | 440    | The frequency of the beep                                                                                                                            |
+| channels.ringer.callWaiting.duration | float   | 0.25    | The duration, in seconds, of one beep. Raised to `fadeIn + fadeOut` if set shorter than the two fades together                                        |
+| channels.ringer.callWaiting.type    | string   | sine    | The waveform to generate (sine, square, sawtooth, triangle). Anything else falls back to sine - an unknown value throws when assigned to the oscillator, and there is no fallback path for the beep |
+| channels.ringer.callWaiting.fadeIn  | float    | 0.01    | Seconds the beep envelope ramps up over. A declick, as with the ringtone fades                                                                        |
+| channels.ringer.callWaiting.fadeOut | float    | 0.02    | Seconds the beep envelope ramps down over                                                                                                            |
 | channels.ringer.previewDuration     | integer  | 8       | Seconds `previewRingtone()` plays before auto-stopping itself                                                                                        |
 | channels.ringer.fadeIn              | float    | 0.01    | Seconds the ringtone envelope ramps up over when ringing starts                                                                                      |
 | channels.ringer.fadeOut             | float    | 0.02    | Seconds the ringtone envelope ramps down over when ringing stops. This is a declick, not a stylistic fade - because the ramp is interpolated per sample by the audio thread it does not need to be long to be clean, and lengthening it just makes the stop audibly slow |
@@ -777,6 +944,12 @@ Re-paint / update all render targets.
 | audioContext.channel.master.volume    | volume (integer between 0 and 1) | Emitted when the master channel volume is updated                      |
 | audioContext.channel.ringer.volume    | volume (integer between 0 and 1) | Emitted when the ringer channel volume is updated                      |
 | audioContext.channel.ringer.selected  | id (string)                      | Emitted when selectRingtone() changes the selected ringtone            |
+| audioContext.callwaiting.started      |                                  | Emitted when the [call waiting tone](#call-waiting-tone) cycle starts - a call is waiting and the tone is enabled |
+| audioContext.callwaiting.stopped      |                                  | Emitted when the cycle stops, whether because the last waiting call was answered or cleared or because the tone was disabled |
+| audioContext.callwaiting.tone.played  |                                  | Emitted for each beep, as it is scheduled                              |
+| audioContext.callwaiting.tone.error   | error, deviceId (string)         | Emitted when a beep cannot play because the AudioContext was not running - the same condition as `audioContext.ringtone.play.error`. The third argument is the speaker (`audiooutput`) device the beep would have played on, rather than [getOutputSinkInfo()](#getoutputsinkinfo): the ring output sink says nothing about where this tone goes. The beep is skipped and the next one in the cycle tries again |
+| audioContext.channel.ringer.callwaiting.enabled | enabled (boolean)      | Emitted when setCallWaitingEnabled() turns the call waiting tone on or off. Not emitted where nothing actually changed |
+| audioContext.channel.ringer.callwaiting.interval | interval (integer)    | Emitted when setCallWaitingInterval() changes the interval, carrying the value actually applied (clamped). Not emitted where nothing actually changed |
 | audioContext.channel.ringer.alertinfo.changed | key (string), id (string or null) | Emitted when setAlertInfoRingtone() adds a mapping or changes one, including when it is cleared back to the selected ringtone (a null id). Not emitted where nothing actually changed |
 | audioContext.channel.ringer.alertinfo.removed | key (string)                | Emitted when removeAlertInfoMapping() deletes a custom mapping         |
 | audioContext.channel.ringer.alertinfo.error | error                        | Emitted when resolving an inbound call's Alert-Info threw - in practice a `channels.ringer.alertInfo.matcher` that failed. The call still rings, with `channels.ringer.selected`; this is how an otherwise invisible fault in a host's own matching surfaces |
@@ -792,13 +965,16 @@ Re-paint / update all render targets.
 | audioContext.channel.preview.volume   | volume (integer between 0 and 1) | Emitted when the preview channel volume is updated                     |
 | audioContext.stream.local.changed     | volume (integer between 0 and 1) | Emitted when the stream used for the preview loopback audio is updated |
 | audioContext.stream.remote.changed    | volume (integer between 0 and 1) | Emitted when the stream used for the remote audio is updated           |
+| audioContext.render.section.unknown   | section (string)                 | Emitted when a render target names a [section](#sections) that does not exist. The target still renders, with the full default template - this is what says the name was not understood, rather than it being silently ignored |
 
 ### Consumed
 
 | Event                                   | Reason                                                                    |
 | --------------------------------------- | ------------------------------------------------------------------------- |
-| call.ringing.started                    | Invokes startRinging() with the call's id, and with the ringtone its `Alert-Info` header maps to (see [Alert-Info ringtones](#alert-info-ringtones)). If resolving that ringtone throws, the call still rings - with `channels.ringer.selected` - and `audioContext.channel.ringer.alertinfo.error` is emitted |
-| call.ringing.stopped                    | Invokes stopRinging() with the call's id                                  |
+| call.ringing.started                    | Invokes startRinging() with the call's id, and with the ringtone its `Alert-Info` header maps to (see [Alert-Info ringtones](#alert-info-ringtones)). If resolving that ringtone throws, the call still rings - with `channels.ringer.selected` - and `audioContext.channel.ringer.alertinfo.error` is emitted. Where another call is already established the call is announced with the [call waiting tone](#call-waiting-tone) instead, via startCallWaiting() |
+| call.ringing.stopped                    | Invokes stopRinging() **and** stopCallWaiting() with the call's id - whichever of the two the call ended up on, the other ignores it |
+| call.established                        | Re-decides ringing vs. call waiting for any call still ringing: a call answered elsewhere means one that is still ringing should drop to the beep |
+| call.terminated, call.ended, call.failed | The same re-decision the other way: the established call a waiting call was waiting behind has gone, so that call takes the ringer over and rings properly |
 | call.primary.remote.audio.added         | Updates the remote source stream                                          |
 | call.primary.remote.mediaStream.connect | Updates the remote source stream                                          |
 | dialpad.tones.play                      | Invokes playTones                                                         |
@@ -814,6 +990,45 @@ Re-paint / update all render targets.
 | audioContext.channel.remote.volume      | Invokes updateRenders() to show the new value                             |
 
 ## Default Template
+
+### Sections
+
+The default template is three sections stacked: the volume controls, the
+ringtones (the ringtone selector and the Alert-Info mappings under it) and the
+call waiting tone controls. A render target that wants one of them on its own
+names it, instead of switching the other two off with `show` flags:
+
+```json
+{
+  "audioContext": {
+    "renderTargets": [
+      { "root": { "elementId": "audio_mixer" }, "section": "volumes" },
+      { "root": { "elementId": "ringtones" }, "section": "ringtones" },
+      { "root": { "elementId": "call_waiting" }, "section": "callwaiting" }
+    ]
+  }
+}
+```
+
+| Section       | Contains                                                                                               |
+| ------------- | ------------------------------------------------------------------------------------------------------ |
+| `volumes`     | The master, ringer, tones, preview and call volume controls, each still subject to its channel's `show` |
+| `ringtones`   | The ringtone selector, its preview button and the Alert-Info controls - `channels.ringer.ringtones.show` |
+| `callwaiting` | The call waiting tone checkbox and, while it is on, the interval input - `channels.ringer.callWaiting.show` |
+
+A section target needs nothing else: the events, i18n keys and data all come
+from the default render config, exactly as for a target that takes the whole
+template. Omitting `section` renders all three, so existing targets are
+unaffected.
+
+Each section keeps its own `show` flags, which are what a *single* target
+rendering the whole template uses to drop a part of it. The two mechanisms are
+independent - use the flags to hide something, and `section` to place things in
+different parts of a page.
+
+A target carrying its own `template` ignores `section`; a `section` naming
+something that doesn't exist renders the full template and emits
+`audioContext.render.section.unknown`.
 
 ### Data
 

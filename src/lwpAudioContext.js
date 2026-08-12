@@ -1,8 +1,24 @@
 "use strict";
 
+import * as JsSIP from "jssip";
+
 import lwpUtils from "./lwpUtils";
 import lwpRenderer from "./lwpRenderer";
 import lwpRingtones from "./lwpRingtones";
+
+// Namespaced logger on JsSIP's own `debug` instance - not a second copy of the
+// module, so lwpUserAgent.startDebug() switches this on with the SIP trace and
+// it prints in the same styled `namespace message` form. Disabled it costs a
+// property read: see _callWaitingLog(), which builds nothing until it is on.
+const callWaitingDebug = JsSIP.debug("libwebphone:callWaiting");
+
+// `debug`'s browser build writes to console.debug, which Chrome files under
+// the Verbose log level and hides by default - so the trace would be there and
+// invisible unless the console's level filter had been widened, which is not
+// something a caller should have to know. Everything else libwebphone logs
+// (the event dump in lwpUserAgent) goes to console.log, so match it: same
+// namespace, same styling, just a level that is actually shown.
+callWaitingDebug.log = console.log.bind(console);
 
 // The two platform-defined Alert-Info values. Named because the library refers
 // to them specifically - they get their own labelled controls in the default
@@ -315,6 +331,195 @@ export default class extends lwpRenderer {
     // Warm the next ring's buffers, picking up any mid-ring selection.
     this._ensureRingtoneBuffer(this._config.channels.ringer.selected);
     this._prewarmAlertInfoRingtones();
+  }
+
+  // The call waiting counterpart of startRinging(): the call is registered as
+  // waiting instead of ringing, and a single beep is played every
+  // `channels.ringer.callWaiting.interval` seconds for as long as any call is
+  // waiting - not one cycle per call.
+  //
+  // `ringtoneId` is remembered rather than used: a waiting call takes the
+  // ringer over with it if the call it was waiting behind clears while it is
+  // still ringing (see _resettleCallWaiting()), and it should ring with the
+  // ringtone its own Alert-Info settled on when it arrived.
+  startCallWaiting(requestId = null, ringtoneId = null) {
+    this.startAudioContext();
+
+    if (this.isRingtonePreviewActive()) {
+      this.stopRingtonePreview();
+    }
+
+    const settled =
+      ringtoneId && this._findRingtone(ringtoneId)
+        ? ringtoneId
+        : this._config.channels.ringer.selected;
+
+    if (!requestId) {
+      this._ringerAudio.waiting.push({ id: null, ringtoneId: settled });
+    } else if (this._waitingCallIndex(requestId) == -1) {
+      this._ringerAudio.waiting.push({ id: requestId, ringtoneId: settled });
+    } else {
+      // Already waiting - nothing has changed, so nothing to announce.
+      this._callWaitingLog("start.ignored", () => ({
+        requestId,
+        reason: "already waiting",
+        waiting: this._ringerAudio.waiting.map((entry) => entry.id),
+      }));
+
+      return;
+    }
+
+    this._callWaitingLog("start", () => ({
+      requestId,
+      ringtoneId: settled,
+      waiting: this._ringerAudio.waiting.map((entry) => entry.id),
+      toneActive: this._ringerAudio.waitingToneActive,
+      enabled: this.isCallWaitingEnabled(),
+    }));
+
+    if (this._ringerAudio.waitingToneActive) {
+      // The cycle is already running for a call that was waiting before this
+      // one. Announce this one as it arrives rather than leaving it to be
+      // covered by a beep up to a full interval away.
+      this._playCallWaitingBeep();
+      this._scheduleCallWaitingBeep();
+
+      return;
+    }
+
+    this._syncCallWaitingTone();
+  }
+
+  stopCallWaiting(requestId = null) {
+    if (!requestId) {
+      requestId = null;
+    }
+
+    const requestIndex = this._waitingCallIndex(requestId);
+
+    if (requestIndex == -1) {
+      return;
+    }
+
+    this._ringerAudio.waiting.splice(requestIndex, 1);
+
+    this._callWaitingLog("stop", () => ({
+      requestId,
+      waiting: this._ringerAudio.waiting.map((entry) => entry.id),
+    }));
+
+    this._syncCallWaitingTone();
+  }
+
+  // Drops every waiting call. Deliberately separate from stopAllRinging():
+  // with a call waiting behind an established one the ring queue is normally
+  // empty, so stopping ringing must not take the beeps with it.
+  stopAllCallWaiting() {
+    this._ringerAudio.waiting = [];
+
+    this._syncCallWaitingTone();
+  }
+
+  // True while any call is waiting, whether or not the tone itself is enabled
+  // - a call presented silently is still waiting.
+  isCallWaiting() {
+    return this._ringerAudio.waiting.length > 0;
+  }
+
+  isCallWaitingEnabled() {
+    return !!this._config.channels.ringer.callWaiting.enabled;
+  }
+
+  // Takes effect immediately, including on a call already waiting: switching
+  // it on mid-call starts the beeps, switching it off silences them and
+  // leaves the call presented silently.
+  setCallWaitingEnabled(enabled) {
+    enabled = !!enabled;
+
+    if (enabled == this.isCallWaitingEnabled()) {
+      return;
+    }
+
+    this._config.channels.ringer.callWaiting.enabled = enabled;
+
+    this._syncCallWaitingTone();
+
+    this._emit("channel.ringer.callwaiting.enabled", this, enabled);
+    this.updateRenders();
+  }
+
+  toggleCallWaiting() {
+    this.setCallWaitingEnabled(!this.isCallWaitingEnabled());
+  }
+
+  getCallWaitingInterval() {
+    return this._config.channels.ringer.callWaiting.interval;
+  }
+
+  // Clamped to [intervalMin, intervalMax] rather than rejected, so a value
+  // straight out of a number input can be passed through. A change while
+  // calls are waiting re-times the next beep from now.
+  setCallWaitingInterval(seconds) {
+    const callWaiting = this._config.channels.ringer.callWaiting;
+    const interval = this._clampCallWaitingInterval(
+      seconds,
+      callWaiting.interval
+    );
+
+    if (interval == callWaiting.interval) {
+      return;
+    }
+
+    callWaiting.interval = interval;
+
+    // Only the wait to the next beep moves - restarting the cycle would beep
+    // again immediately, every time the slider moved.
+    if (this._ringerAudio.waitingToneActive) {
+      this._scheduleCallWaitingBeep();
+    }
+
+    this._emit("channel.ringer.callwaiting.interval", this, interval);
+    this.updateRenders();
+  }
+
+  // Whether the call waiting trace is being logged. Owned by debug mode (lwpUserAgent.startDebug())
+  isCallWaitingDebug() {
+    return !!callWaitingDebug.enabled;
+  }
+
+  // Everything that decides whether a beep is heard, in one object - the queue
+  // state, the calls the routing decision reads, and the output path the beep
+  // is scheduled onto. Safe to call at any time; the intended use is to call
+  // it at the moment something is wrong and read it back.
+  getCallWaitingDiagnostics() {
+    const callList = this._libwebphone.getCallList();
+    const callWaiting = this._config.channels.ringer.callWaiting;
+
+    return {
+      enabled: callWaiting.enabled,
+      interval: callWaiting.interval,
+      volume: callWaiting.volume,
+      waiting: this._ringerAudio.waiting.map((entry) => entry.id),
+      toneActive: this._ringerAudio.waitingToneActive,
+      timerArmed: !!this._ringerAudio.waitingTimer,
+      generation: this._ringerAudio.waitingGeneration,
+      ringQueue: this._ringerAudio.calls.map((entry) => entry.id),
+      ringerConnected: this._ringerAudio.ringerConnected,
+      calls: callList
+        ? callList.getCalls().map((call) => {
+            return {
+              id: call.getId(),
+              hasSession: call.hasSession(),
+              ringing: call.isRinging(),
+              established: call.isEstablished(),
+              held: call.isOnHold(),
+              ended: call.isEnded(),
+              primary: call.isPrimary(),
+            };
+          })
+        : null,
+      output: this._callWaitingOutputInfo(),
+    };
   }
 
   getRingtones() {
@@ -712,6 +917,34 @@ export default class extends lwpRenderer {
     });
   }
 
+  // A render target can name one of the default template's sections instead
+  // of carrying a template of its own:
+  //
+  //   { root: { elementId: "call_waiting" }, section: "callwaiting" }
+  //
+  // and gets that section alone - no `show` flags switching the other two
+  // off, which would leave every target's config describing what it is *not*.
+  // The rest still comes from the default config, so the events, i18n keys
+  // and data need no restating either.
+  //
+  // An explicit `template` wins: a target supplying its own markup has said
+  // what it wants more precisely than a section name can.
+  renderAddTarget(config) {
+    if (config && typeof config == "object" && config.section) {
+      const sections = this._renderSectionTemplates();
+
+      if (!sections[config.section]) {
+        // Announced rather than quietly falling back to the whole template,
+        // which reads as the section name having been ignored.
+        this._emit("render.section.unknown", this, config.section);
+      } else if (!config.template) {
+        config = { ...config, template: sections[config.section] };
+      }
+    }
+
+    return super.renderAddTarget(config);
+  }
+
   /** Init functions */
 
   _initInternationalization(config) {
@@ -719,9 +952,13 @@ export default class extends lwpRenderer {
       en: {
         mastervolume: "Master Volume",
         ringervolume: "Ringer Volume",
+        ringtonesection: "Ringtones",
         ringtone: "Ringtone",
         ringtonepreview: "Preview",
         ringtonepreviewstop: "Stop",
+        callwaitingsection: "Call Waiting",
+        callwaiting: "Call Waiting Tone",
+        callwaitinginterval: "Call Waiting Tone Interval (seconds)",
         alertinfointernal: "Internal Call Ringtone",
         alertinfoexternal: "External Call Ringtone",
         alertinfocustom: "Custom Alert-Info Ringtones",
@@ -765,6 +1002,14 @@ export default class extends lwpRenderer {
             : lwpRingtones.length > 0
             ? lwpRingtones[0].id
             : null,
+          // The section holding the ringtone selector, its preview button and
+          // the Alert-Info mappings below. Gated separately from the ringer
+          // channel's own `show` (the ringing volume control) so a host app
+          // can render its volume mixer in one place and the ringtones in
+          // another - which is what the test harness does.
+          ringtones: {
+            show: true,
+          },
           // Per-Alert-Info ringtones: an inbound INVITE carrying a matching
           // Alert-Info header rings with its own ringtone instead of
           // `selected`. See getRingtoneForAlertInfo().
@@ -801,6 +1046,38 @@ export default class extends lwpRenderer {
               [INTERNAL_KEY]: null,
               [EXTERNAL_KEY]: null,
             },
+          },
+          // The call waiting tone: a call arriving while another is already
+          // established (in or out of hold) doesn't ring over it, it gets a
+          // periodic beep instead, the way a desk phone does. Played out of
+          // the speaker (`audiooutput`) rather than the ring output, since the
+          // person it is for is already on a call - see
+          // _playCallWaitingBeep().
+          callWaiting: {
+            // With this off the waiting call is presented silently: it still
+            // appears in the call list and can be answered, it just makes no
+            // sound. It does *not* fall back to ringing over the active call.
+            enabled: true,
+            show: true,
+            // Seconds between beeps, clamped to [intervalMin, intervalMax] -
+            // see _clampCallWaitingInterval().
+            interval: 30,
+            intervalMin: 10,
+            intervalMax: 60,
+            // The beep itself. Well below full scale: this plays into a
+            // headset someone is already holding a conversation on, so it has
+            // to carry over that conversation without startling them. For
+            // reference the DTMF feedback tones on the same device sit at
+            // 0.15, and those are not competing with anything.
+            volume: 0.25,
+            frequency: 440,
+            duration: 0.25,
+            type: "sine",
+            // As with the ringtone envelope, these are declicks rather than a
+            // stylistic fade - a beep that starts and stops mid-waveform
+            // clicks at both ends.
+            fadeIn: 0.01,
+            fadeOut: 0.02,
           },
           // How long previewRingtone() plays before auto-stopping itself
           previewDuration: 8,
@@ -883,7 +1160,9 @@ export default class extends lwpRenderer {
           : null;
     }
 
+    this._normalizeRingtonesConfig();
     this._normalizeAlertInfoConfig();
+    this._normalizeCallWaitingConfig();
 
     this._audioContext = this._shimAudioContext();
   }
@@ -974,6 +1253,21 @@ export default class extends lwpRenderer {
       this._outputAudio.tonesDestinationStream
     );
 
+    // The call waiting beep goes to the speaker, not the ring output: it
+    // announces a second call to someone who is already on one, so it belongs
+    // where that conversation is - see _playCallWaitingBeep(). Its own node on
+    // the tones stream rather than tonesGain itself, so the DTMF feedback
+    // volume (0.15 by default) doesn't scale it, or silence it outright when a
+    // user turns keypress feedback down.
+    this._outputAudio.callWaitingGain = this._shimCreateGain(
+      this._outputAudio.context
+    );
+    this._outputAudio.callWaitingGain.gain.value =
+      this._config.channels.ringer.callWaiting.volume;
+    this._outputAudio.callWaitingGain.connect(
+      this._outputAudio.tonesDestinationStream
+    );
+
     const ringerElement = mediaDevices
       ? mediaDevices.getMediaElement("ringoutput")
       : null;
@@ -1046,6 +1340,24 @@ export default class extends lwpRenderer {
 
     this._ringerAudio.ringerConnected = false;
 
+    // The calls being beeped at rather than rung for - same `{ id, ringtoneId }`
+    // shape as the ring queue, because a call moves between the two as the
+    // call it is waiting behind comes and goes (see _resettleCallWaiting()).
+    // Unlike the ring queue this isn't ordered by ownership: one beep covers
+    // however many calls are waiting.
+    this._ringerAudio.waiting = [];
+
+    // Whether the beep cycle is running. Tracks (waiting calls && the tone is
+    // enabled), so a waiting call with the tone switched off is held here
+    // silently and starts beeping if it is switched on mid-call.
+    this._ringerAudio.waitingToneActive = false;
+
+    this._ringerAudio.waitingTimer = null;
+
+    // Invalidates a beep whose resume hasn't settled yet, the same way
+    // `generation` does for ringing - see _playCallWaitingBeep().
+    this._ringerAudio.waitingGeneration = 0;
+
     // Decoded AudioBuffers keyed by ringtone id (see _ensureRingtoneBuffer),
     // pruned to just what's reachable - these are expensive to hold.
     this._ringerAudio.buffers = {};
@@ -1112,6 +1424,18 @@ export default class extends lwpRenderer {
   }
 
   _initEventBindings() {
+    // Debug only, and deliberately the *first* thing bound: a call that never
+    // reaches "ringing.started" leaves nothing else in the trace, and this is
+    // what separates "the call never got here" from "it was routed wrongly".
+    this._libwebphone.on("call.created", (lwp, call) => {
+      this._callWaitingLog("call.created", () => ({
+        callId: call.getId(),
+        ringing: call.isRinging(),
+        direction: call.getDirection(),
+        hasSession: call.hasSession(),
+      }));
+    });
+
     this._libwebphone.on("call.ringing.started", (lwp, call) => {
       // Resolved here rather than inside startRinging() so a host app calling
       // startRinging() by hand keeps the behaviour it always had.
@@ -1128,11 +1452,51 @@ export default class extends lwpRenderer {
         this._emit("channel.ringer.alertinfo.error", this, error);
       }
 
+      // A call arriving on top of an established one is announced with the
+      // call waiting tone instead of ringing over it - see startCallWaiting().
+      const shouldWait = this._shouldCallWait(call.getId());
+
+      this._callWaitingLog("call.ringing.started", () => ({
+        callId: call.getId(),
+        route: shouldWait ? "callwaiting" : "ringing",
+        ringtoneId,
+      }));
+
+      if (shouldWait) {
+        this.startCallWaiting(call.getId(), ringtoneId);
+
+        return;
+      }
+
       this.startRinging(call.getId(), ringtoneId);
     });
     this._libwebphone.on("call.ringing.stopped", (lwp, call) => {
+      this._callWaitingLog("call.ringing.stopped", () => ({ callId: call.getId() }));
+
+      // Whichever of the two it ended up on - the call may have moved between
+      // them while it rang, and the one it isn't on ignores it.
       this.stopRinging(call.getId());
+      this.stopCallWaiting(call.getId());
     });
+
+    // Which of the two an unanswered call belongs on depends on the calls
+    // around it, so it is re-decided whenever one of those changes rather than
+    // only when the call itself arrived: an established call clearing hands
+    // the ringer to the call that was waiting behind it, and a call being
+    // answered elsewhere drops one that is still ringing to the beep.
+    ["call.established", "call.terminated", "call.ended", "call.failed"].forEach(
+      (event) => {
+        this._libwebphone.on(event, (lwp, call) => {
+          this._callWaitingLog(event, () => ({
+            callId: call ? call.getId() : null,
+            waiting: this._ringerAudio.waiting.map((entry) => entry.id),
+            ringQueue: this._ringerAudio.calls.map((entry) => entry.id),
+          }));
+
+          this._resettleCallWaiting();
+        });
+      }
+    );
 
     this._libwebphone.on(
       "call.primary.remote.audio.added",
@@ -1303,9 +1667,13 @@ export default class extends lwpRenderer {
       i18n: {
         mastervolume: "libwebphone:audioContext.mastervolume",
         ringervolume: "libwebphone:audioContext.ringervolume",
+        ringtonesection: "libwebphone:audioContext.ringtonesection",
         ringtone: "libwebphone:audioContext.ringtone",
         ringtonepreview: "libwebphone:audioContext.ringtonepreview",
         ringtonepreviewstop: "libwebphone:audioContext.ringtonepreviewstop",
+        callwaitingsection: "libwebphone:audioContext.callwaitingsection",
+        callwaiting: "libwebphone:audioContext.callwaiting",
+        callwaitinginterval: "libwebphone:audioContext.callwaitinginterval",
         alertinfointernal: "libwebphone:audioContext.alertinfointernal",
         alertinfoexternal: "libwebphone:audioContext.alertinfoexternal",
         alertinfocustom: "libwebphone:audioContext.alertinfocustom",
@@ -1354,6 +1722,27 @@ export default class extends lwpRenderer {
               // previewRingtone(). A preview started from one of the
               // Alert-Info rows switches here rather than just stopping.
               this.toggleRingtonePreview();
+            },
+          },
+        },
+        callwaiting: {
+          events: {
+            onchange: (event) => {
+              this.setCallWaitingEnabled(event.srcElement.checked);
+            },
+          },
+        },
+        callwaitinginterval: {
+          events: {
+            onchange: (event) => {
+              const element = event.srcElement;
+
+              this.setCallWaitingInterval(element.value);
+
+              // Written back rather than left as typed: the interval is
+              // clamped, and a value that clamped to what was already set
+              // changes nothing and so re-renders nothing.
+              element.value = this.getCallWaitingInterval();
             },
           },
         },
@@ -1521,9 +1910,47 @@ export default class extends lwpRenderer {
     }
   }
 
+  // The default template is the three sections below, stacked. A render
+  // target that wants one of them on its own asks for it by name rather than
+  // switching the other two off - see renderAddTarget().
   _renderDefaultTemplate() {
     return `
         <div>
+          ${this._renderVolumesSection()}
+
+          ${this._renderRingtonesSection()}
+
+          ${this._renderCallWaitingSection()}
+        </div>
+        `;
+  }
+
+  // The same sections as standalone templates, each wrapped in the root the
+  // renderer writes into. Keyed by the name a render target passes as
+  // `section`.
+  _renderSectionTemplates() {
+    return {
+      volumes: `
+        <div>
+          ${this._renderVolumesSection()}
+        </div>
+        `,
+      ringtones: `
+        <div>
+          ${this._renderRingtonesSection()}
+        </div>
+        `,
+      callwaiting: `
+        <div>
+          ${this._renderCallWaitingSection()}
+        </div>
+        `,
+    };
+  }
+
+  // One row per channel, each on its own `show` - a mixer, and nothing else.
+  _renderVolumesSection() {
+    return `
           {{#data.channels.master.show}}
             <div>
               <label for="{{by_id.mastervolume.elementId}}">
@@ -1568,130 +1995,169 @@ export default class extends lwpRenderer {
               <input type="range" min="{{data.volume.min}}" max="{{data.volume.max}}" value="{{data.volumes.remote}}" id="{{by_id.remotevolume.elementId}}">
             </div>
           {{/data.channels.remote.show}}
+    `;
+  }
 
-          {{#data.channels.ringer.show}}
-            <div>
-              <label for="{{by_id.ringtone.elementId}}">
-                {{i18n.ringtone}}
-              </label>
-              <select id="{{by_id.ringtone.elementId}}">
-                {{#data.ringtones}}
-                  <option value="{{id}}" {{#selected}}selected{{/selected}}>{{name}}</option>
-                {{/data.ringtones}}
-              </select>
-              <button type="button" id="{{by_id.ringtonepreview.elementId}}">
-                {{#data.ringtonePreviewActive}}{{i18n.ringtonepreviewstop}}{{/data.ringtonePreviewActive}}
-                {{^data.ringtonePreviewActive}}{{i18n.ringtonepreview}}{{/data.ringtonePreviewActive}}
-              </button>
-            </div>
-          {{/data.channels.ringer.show}}
-
-          {{#data.channels.ringer.alertInfo.show}}
-            {{#data.alertInfo.internal}}
-              <div>
-                <label for="{{by_id.alertinfointernal.elementId}}">
-                  {{i18n.alertinfointernal}}
-                </label>
-                <select id="{{by_id.alertinfointernal.elementId}}">
-                  <option value="">{{i18n.alertinfodefault}}</option>
-                  {{#ringtones}}
-                    <option value="{{id}}" {{#selected}}selected{{/selected}}>{{name}}</option>
-                  {{/ringtones}}
-                </select>
-                <button type="button" id="{{by_id.alertinfointernalpreview.elementId}}">
-                  {{#previewing}}{{i18n.ringtonepreviewstop}}{{/previewing}}
-                  {{^previewing}}{{i18n.ringtonepreview}}{{/previewing}}
-                </button>
-              </div>
-            {{/data.alertInfo.internal}}
-
-            {{#data.alertInfo.external}}
-              <div>
-                <label for="{{by_id.alertinfoexternal.elementId}}">
-                  {{i18n.alertinfoexternal}}
-                </label>
-                <select id="{{by_id.alertinfoexternal.elementId}}">
-                  <option value="">{{i18n.alertinfodefault}}</option>
-                  {{#ringtones}}
-                    <option value="{{id}}" {{#selected}}selected{{/selected}}>{{name}}</option>
-                  {{/ringtones}}
-                </select>
-                <button type="button" id="{{by_id.alertinfoexternalpreview.elementId}}">
-                  {{#previewing}}{{i18n.ringtonepreviewstop}}{{/previewing}}
-                  {{^previewing}}{{i18n.ringtonepreview}}{{/previewing}}
-                </button>
-              </div>
-            {{/data.alertInfo.external}}
-
+  // The ringtone selector and the Alert-Info mappings belong together: they
+  // pick the same thing, one by hand and one by what the INVITE carried.
+  // Gated separately from the ringer volume, so a host app can render the two
+  // in different places - see channels.ringer.ringtones.show.
+  _renderRingtonesSection() {
+    return `
+          {{#data.channels.ringer.ringtones.show}}
             <fieldset>
-              <legend>{{i18n.alertinfocustom}}</legend>
-
-              {{#data.alertInfo.hasCustom}}
-                <table>
-                  <thead>
-                    <tr>
-                      <th scope="col">{{i18n.alertinfokey}}</th>
-                      <th scope="col">{{i18n.ringtone}}</th>
-                      <th scope="col"></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {{#data.alertInfo.custom}}
-                      <tr>
-                        {{! A row header, not a cell: it is what names the
-                            controls beside it, so a screen reader announces
-                            which mapping a Preview or Remove belongs to
-                            without every button needing a label of its own. }}
-                        <th scope="row">{{key}}</th>
-                        <td>
-                          <select name="{{by_name.alertinfomapping.elementName}}" data-alert-info="{{key}}" aria-label="{{i18n.ringtone}}">
-                            <option value="">{{i18n.alertinfodefault}}</option>
-                            {{#ringtones}}
-                              <option value="{{id}}" {{#selected}}selected{{/selected}}>{{name}}</option>
-                            {{/ringtones}}
-                          </select>
-                        </td>
-                        <td>
-                          <button type="button" name="{{by_name.alertinfopreview.elementName}}" value="{{key}}">
-                            {{#previewing}}{{i18n.ringtonepreviewstop}}{{/previewing}}
-                            {{^previewing}}{{i18n.ringtonepreview}}{{/previewing}}
-                          </button>
-                          {{#removable}}
-                            <button type="button" name="{{by_name.alertinforemove.elementName}}" value="{{key}}">
-                              {{i18n.alertinforemove}}
-                            </button>
-                          {{/removable}}
-                        </td>
-                      </tr>
-                    {{/data.alertInfo.custom}}
-                  </tbody>
-                </table>
-              {{/data.alertInfo.hasCustom}}
-
-              {{^data.alertInfo.hasCustom}}
-                <p>{{i18n.alertinfoempty}}</p>
-              {{/data.alertInfo.hasCustom}}
+              <legend>{{i18n.ringtonesection}}</legend>
 
               <div>
-                {{! Labelled with aria-label rather than a <label>: the row is
-                    a compact toolbar, and a placeholder is not an accessible
-                    name (it disappears as soon as anything is typed). }}
-                <input type="text" id="{{by_id.alertinfokey.elementId}}" placeholder="{{i18n.alertinfokey}}" aria-label="{{i18n.alertinfokey}}">
-                <select id="{{by_id.alertinforingtone.elementId}}" aria-label="{{i18n.ringtone}}">
-                  <option value="">{{i18n.alertinfodefault}}</option>
-                  {{#data.alertInfo.ringtones}}
-                    <option value="{{id}}">{{name}}</option>
-                  {{/data.alertInfo.ringtones}}
+                <label for="{{by_id.ringtone.elementId}}">
+                  {{i18n.ringtone}}
+                </label>
+                <select id="{{by_id.ringtone.elementId}}">
+                  {{#data.ringtones}}
+                    <option value="{{id}}" {{#selected}}selected{{/selected}}>{{name}}</option>
+                  {{/data.ringtones}}
                 </select>
-                <button type="button" id="{{by_id.alertinfoadd.elementId}}">
-                  {{i18n.alertinfoadd}}
+                <button type="button" id="{{by_id.ringtonepreview.elementId}}">
+                  {{#data.ringtonePreviewActive}}{{i18n.ringtonepreviewstop}}{{/data.ringtonePreviewActive}}
+                  {{^data.ringtonePreviewActive}}{{i18n.ringtonepreview}}{{/data.ringtonePreviewActive}}
                 </button>
               </div>
-            </fieldset>
-          {{/data.channels.ringer.alertInfo.show}}
 
-        </div>
-        `;
+              {{#data.channels.ringer.alertInfo.show}}
+                {{#data.alertInfo.internal}}
+                  <div>
+                    <label for="{{by_id.alertinfointernal.elementId}}">
+                      {{i18n.alertinfointernal}}
+                    </label>
+                    <select id="{{by_id.alertinfointernal.elementId}}">
+                      <option value="">{{i18n.alertinfodefault}}</option>
+                      {{#ringtones}}
+                        <option value="{{id}}" {{#selected}}selected{{/selected}}>{{name}}</option>
+                      {{/ringtones}}
+                    </select>
+                    <button type="button" id="{{by_id.alertinfointernalpreview.elementId}}">
+                      {{#previewing}}{{i18n.ringtonepreviewstop}}{{/previewing}}
+                      {{^previewing}}{{i18n.ringtonepreview}}{{/previewing}}
+                    </button>
+                  </div>
+                {{/data.alertInfo.internal}}
+
+                {{#data.alertInfo.external}}
+                  <div>
+                    <label for="{{by_id.alertinfoexternal.elementId}}">
+                      {{i18n.alertinfoexternal}}
+                    </label>
+                    <select id="{{by_id.alertinfoexternal.elementId}}">
+                      <option value="">{{i18n.alertinfodefault}}</option>
+                      {{#ringtones}}
+                        <option value="{{id}}" {{#selected}}selected{{/selected}}>{{name}}</option>
+                      {{/ringtones}}
+                    </select>
+                    <button type="button" id="{{by_id.alertinfoexternalpreview.elementId}}">
+                      {{#previewing}}{{i18n.ringtonepreviewstop}}{{/previewing}}
+                      {{^previewing}}{{i18n.ringtonepreview}}{{/previewing}}
+                    </button>
+                  </div>
+                {{/data.alertInfo.external}}
+
+                <fieldset>
+                  <legend>{{i18n.alertinfocustom}}</legend>
+
+                  {{#data.alertInfo.hasCustom}}
+                    <table>
+                      <thead>
+                        <tr>
+                          <th scope="col">{{i18n.alertinfokey}}</th>
+                          <th scope="col">{{i18n.ringtone}}</th>
+                          <th scope="col"></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {{#data.alertInfo.custom}}
+                          <tr>
+                            {{! A row header, not a cell: it is what names the
+                                controls beside it, so a screen reader announces
+                                which mapping a Preview or Remove belongs to
+                                without every button needing a label of its own. }}
+                            <th scope="row">{{key}}</th>
+                            <td>
+                              <select name="{{by_name.alertinfomapping.elementName}}" data-alert-info="{{key}}" aria-label="{{i18n.ringtone}}">
+                                <option value="">{{i18n.alertinfodefault}}</option>
+                                {{#ringtones}}
+                                  <option value="{{id}}" {{#selected}}selected{{/selected}}>{{name}}</option>
+                                {{/ringtones}}
+                              </select>
+                            </td>
+                            <td>
+                              <button type="button" name="{{by_name.alertinfopreview.elementName}}" value="{{key}}">
+                                {{#previewing}}{{i18n.ringtonepreviewstop}}{{/previewing}}
+                                {{^previewing}}{{i18n.ringtonepreview}}{{/previewing}}
+                              </button>
+                              {{#removable}}
+                                <button type="button" name="{{by_name.alertinforemove.elementName}}" value="{{key}}">
+                                  {{i18n.alertinforemove}}
+                                </button>
+                              {{/removable}}
+                            </td>
+                          </tr>
+                        {{/data.alertInfo.custom}}
+                      </tbody>
+                    </table>
+                  {{/data.alertInfo.hasCustom}}
+
+                  {{^data.alertInfo.hasCustom}}
+                    <p>{{i18n.alertinfoempty}}</p>
+                  {{/data.alertInfo.hasCustom}}
+
+                  <div>
+                    {{! Labelled with aria-label rather than a <label>: the row
+                        is a compact toolbar, and a placeholder is not an
+                        accessible name (it disappears as soon as anything is
+                        typed). }}
+                    <input type="text" id="{{by_id.alertinfokey.elementId}}" placeholder="{{i18n.alertinfokey}}" aria-label="{{i18n.alertinfokey}}">
+                    <select id="{{by_id.alertinforingtone.elementId}}" aria-label="{{i18n.ringtone}}">
+                      <option value="">{{i18n.alertinfodefault}}</option>
+                      {{#data.alertInfo.ringtones}}
+                        <option value="{{id}}">{{name}}</option>
+                      {{/data.alertInfo.ringtones}}
+                    </select>
+                    <button type="button" id="{{by_id.alertinfoadd.elementId}}">
+                      {{i18n.alertinfoadd}}
+                    </button>
+                  </div>
+                </fieldset>
+              {{/data.channels.ringer.alertInfo.show}}
+            </fieldset>
+          {{/data.channels.ringer.ringtones.show}}
+    `;
+  }
+
+  _renderCallWaitingSection() {
+    return `
+          {{#data.channels.ringer.callWaiting.show}}
+            <fieldset>
+              <legend>{{i18n.callwaitingsection}}</legend>
+
+              <div>
+                {{! Checkbox before its label, unlike the controls above: the
+                    label follows the box it toggles. }}
+                <input type="checkbox" id="{{by_id.callwaiting.elementId}}" {{#data.callWaiting.enabled}}checked{{/data.callWaiting.enabled}}>
+                <label for="{{by_id.callwaiting.elementId}}">
+                  {{i18n.callwaiting}}
+                </label>
+              </div>
+
+              {{#data.callWaiting.enabled}}
+                <div>
+                  <label for="{{by_id.callwaitinginterval.elementId}}">
+                    {{i18n.callwaitinginterval}}
+                  </label>
+                  <input type="number" min="{{data.callWaiting.intervalMin}}" max="{{data.callWaiting.intervalMax}}" step="1" value="{{data.callWaiting.interval}}" id="{{by_id.callwaitinginterval.elementId}}">
+                </div>
+              {{/data.callWaiting.enabled}}
+            </fieldset>
+          {{/data.channels.ringer.callWaiting.show}}
+    `;
   }
 
   _renderData(data = { volumes: {}, volume: {} }) {
@@ -1715,6 +2181,19 @@ export default class extends lwpRenderer {
     // Alert-Info row leaves this false.
     data.ringtonePreviewActive = this.isRingtonePreviewActive(null);
     data.alertInfo = this._renderAlertInfoData();
+
+    // Read live rather than from the cloned config the render was built with
+    // (see _renderConfigData) - that is a snapshot, so a toggle or an
+    // interval change wouldn't show up in it.
+    const callWaiting = this._config.channels.ringer.callWaiting;
+
+    data.callWaiting = {
+      enabled: this.isCallWaitingEnabled(),
+      interval: this.getCallWaitingInterval(),
+      intervalMin: callWaiting.intervalMin,
+      intervalMax: callWaiting.intervalMax,
+      waiting: this.isCallWaiting(),
+    };
 
     return data;
   }
@@ -1942,6 +2421,12 @@ export default class extends lwpRenderer {
       ...this._ringerAudio.calls.map((entry) => {
         return entry.ringtoneId;
       }),
+      // And for the calls being beeped at rather than rung for: one of those
+      // takes the ringer over if the call it is waiting behind clears while
+      // it is still ringing (see _resettleCallWaiting()).
+      ...this._ringerAudio.waiting.map((entry) => {
+        return entry.ringtoneId;
+      }),
     ];
 
     if (alertInfo.enabled && alertInfo.prewarm) {
@@ -2107,6 +2592,424 @@ export default class extends lwpRenderer {
         this.getOutputSinkInfo()
       );
     });
+  }
+
+  // `details` is a function, not an object: it is only called once the logger
+  // is actually enabled, so with debug off nothing here walks a queue or reads
+  // an element's state - the cost is the property read below.
+  _callWaitingLog(event, details) {
+    if (!callWaitingDebug.enabled) {
+      return;
+    }
+
+    // One line per event, details as an object so the console renders it
+    // expandable rather than as a wall of text.
+    callWaitingDebug(event, details ? details() : "");
+  }
+
+  // Where the beep actually goes, and whether anything is in a state to play
+  // it. The beep is scheduled onto the AudioContext graph but only becomes
+  // audible through the `audiooutput` element, so a paused or re-pointed
+  // element is silence that the scheduling side cannot see.
+  _callWaitingOutputInfo() {
+    const mediaDevices = this._libwebphone.getMediaDevices();
+    const element = mediaDevices
+      ? mediaDevices.getMediaElement("audiooutput")
+      : null;
+
+    const info = {
+      contextState: this._audioContext.state,
+      gainConnected: !!this._outputAudio.callWaitingGain,
+      gain: this._outputAudio.callWaitingGain
+        ? this._outputAudio.callWaitingGain.gain.value
+        : null,
+      masterVolume: this._config.channels.master.volume,
+    };
+
+    if (!element) {
+      info.element = null;
+
+      return info;
+    }
+
+    info.element = {
+      paused: element.paused,
+      muted: element.muted,
+      volume: element.volume,
+      readyState: element.readyState,
+      hasStream: !!element.srcObject,
+      // The beep is only audible if this is still the tones stream the
+      // context created - anything else means something re-pointed it.
+      isTonesStream: !!(
+        element.srcObject &&
+        this._outputAudio.tonesDestinationStream &&
+        element.srcObject.id == this._outputAudio.tonesDestinationStream.stream.id
+      ),
+      sinkId: element.sinkId,
+    };
+
+    return info;
+  }
+
+  // The call waiting counterpart of _ringingCallIndex(). The waiting list has
+  // no front to own anything, so this is only ever an identity lookup.
+  _waitingCallIndex(requestId) {
+    return this._ringerAudio.waiting.findIndex((entry) => {
+      return entry.id === requestId;
+    });
+  }
+
+  // Whether a call should be beeped at rather than rung for: true when some
+  // *other* call is already established. Held counts - a held call is still a
+  // call in progress, and ringing over the top of one is exactly what the
+  // call waiting tone replaces. A call that has ended but hasn't left the
+  // call list yet doesn't, so the order the terminated handlers run in can't
+  // leave a waiting call beeping at a call that is already gone.
+  _shouldCallWait(callId) {
+    const callList = this._libwebphone.getCallList();
+
+    if (!callList) {
+      this._callWaitingLog("shouldWait", () => ({
+        callId,
+        result: false,
+        reason: "no call list",
+      }));
+
+      return false;
+    }
+
+    const others = callList.getCalls().filter((call) => {
+      return call.getId() !== callId;
+    });
+
+    // The decision itself is this line; everything below only describes it.
+    const result = others.some((call) => {
+      return call.isEstablished() && !call.isEnded();
+    });
+
+    this._callWaitingLog("shouldWait", () => ({
+      callId,
+      result,
+      blockedBy: others
+        .filter((call) => {
+          return call.isEstablished() && !call.isEnded();
+        })
+        .map((call) => call.getId()),
+      // Every call the decision was taken against, so a wrong answer names
+      // the call that caused it.
+      others: others.map((call) => {
+        return {
+          id: call.getId(),
+          hasSession: call.hasSession(),
+          established: call.isEstablished(),
+          ended: call.isEnded(),
+          ringing: call.isRinging(),
+        };
+      }),
+    }));
+
+    return result;
+  }
+
+  // Re-routes calls between ringing and waiting after the calls around them
+  // change - an established call clearing, or one being answered while
+  // something else is still ringing. Both directions are needed: the call the
+  // beeps were protecting can go away (the waiting call should then ring
+  // properly), and a call can become established while another is ringing
+  // (that one should drop to the beep).
+  _resettleCallWaiting() {
+    const callList = this._libwebphone.getCallList();
+
+    if (!callList) {
+      return;
+    }
+
+    // Only entries that are a call still ringing are re-routed. A host
+    // application driving startRinging() itself - with no id, or an id of its
+    // own - keeps exactly what it asked for, and a call already on its way out
+    // is left for the `ringing.stopped` that is about to remove it.
+    const isRingingCall = (entry) => {
+      const call = entry.id ? callList.getCall(entry.id) : null;
+
+      return !!call && call.isRinging() && !call.isEnded();
+    };
+
+    // Snapshots: the moves below mutate both lists.
+    const ringing = this._ringerAudio.calls.filter(isRingingCall);
+    const waiting = this._ringerAudio.waiting.filter(isRingingCall);
+
+    ringing.forEach((entry) => {
+      if (this._shouldCallWait(entry.id)) {
+        this._callWaitingLog("resettle", () => ({ callId: entry.id, to: "waiting" }));
+        this.stopRinging(entry.id);
+        this.startCallWaiting(entry.id, entry.ringtoneId);
+      }
+    });
+
+    waiting.forEach((entry) => {
+      if (!this._shouldCallWait(entry.id)) {
+        this._callWaitingLog("resettle", () => ({ callId: entry.id, to: "ringing" }));
+        this.stopCallWaiting(entry.id);
+        this.startRinging(entry.id, entry.ringtoneId);
+      }
+    });
+  }
+
+  // The single owner of whether the beep cycle is running: everything that can
+  // change the answer (a call arriving or leaving, the toggle) just calls
+  // this. One cycle covers however many calls are waiting.
+  _syncCallWaitingTone() {
+    const shouldPlay = this.isCallWaitingEnabled() && this.isCallWaiting();
+
+    if (shouldPlay == this._ringerAudio.waitingToneActive) {
+      this._callWaitingLog("sync.unchanged", () => ({
+        toneActive: this._ringerAudio.waitingToneActive,
+        timerArmed: !!this._ringerAudio.waitingTimer,
+        waiting: this._ringerAudio.waiting.map((entry) => entry.id),
+      }));
+
+      return;
+    }
+
+    this._ringerAudio.waitingToneActive = shouldPlay;
+
+    this._callWaitingLog(shouldPlay ? "cycle.start" : "cycle.stop", () => ({
+      waiting: this._ringerAudio.waiting.map((entry) => entry.id),
+      interval: this.getCallWaitingInterval(),
+      enabled: this.isCallWaitingEnabled(),
+    }));
+
+    if (shouldPlay) {
+      this._emit("callwaiting.started", this);
+
+      // Beep as the call arrives and then every interval, rather than making
+      // the first notification wait a full interval.
+      this._playCallWaitingBeep();
+      this._scheduleCallWaitingBeep();
+
+      return;
+    }
+
+    // Drops a beep whose resume hasn't settled yet, so one can't sound after
+    // the last waiting call is answered or cleared.
+    this._ringerAudio.waitingGeneration++;
+
+    clearTimeout(this._ringerAudio.waitingTimer);
+    this._ringerAudio.waitingTimer = null;
+
+    this._emit("callwaiting.stopped", this);
+  }
+
+  // A re-armed timeout rather than an interval, so a mid-call
+  // setCallWaitingInterval() applies to the very next beep.
+  _scheduleCallWaitingBeep() {
+    clearTimeout(this._ringerAudio.waitingTimer);
+
+    const interval = this.getCallWaitingInterval();
+
+    this._callWaitingLog("beep.scheduled", () => ({ inSeconds: interval }));
+
+    this._ringerAudio.waitingTimer = setTimeout(() => {
+      this._ringerAudio.waitingTimer = null;
+
+      if (!this._ringerAudio.waitingToneActive) {
+        this._callWaitingLog("beep.timer.stale", () => ({
+          reason: "cycle no longer active",
+          waiting: this._ringerAudio.waiting.map((entry) => entry.id),
+        }));
+
+        return;
+      }
+
+      this._playCallWaitingBeep();
+      this._scheduleCallWaitingBeep();
+    }, interval * 1000);
+  }
+
+  // One beep, generated rather than decoded - it is a single tone, so there is
+  // nothing to load and nothing to keep warm. It plays out of the **speaker**
+  // (the `audiooutput` device, where call audio is), not the ring output or
+  // the secondary ringer: the person it is for is already on a call, wearing
+  // the headset, and a beep on the ring device would be aimed at a room they
+  // are not listening to. See _initOutputAudio() for the node it connects to.
+  //
+  // Self-terminating, so nothing needs stopping - a beep already sounding when
+  // the call is answered finishes, a fraction of a second later.
+  _playCallWaitingBeep() {
+    const generation = ++this._ringerAudio.waitingGeneration;
+
+    this._resumeAudioContext().then((running) => {
+      // The cycle was stopped, or another beep started, while we waited.
+      if (this._ringerAudio.waitingGeneration !== generation) {
+        this._callWaitingLog("beep.dropped", () => ({
+          reason: "superseded while resuming",
+          generation,
+          current: this._ringerAudio.waitingGeneration,
+        }));
+
+        return;
+      }
+
+      if (!running) {
+        // As with ringing, there is no fallback path - report it rather than
+        // failing silently. The next beep tries again.
+        this._callWaitingLog("beep.failed", () => ({
+          reason: "AudioContext is not running",
+          output: this._callWaitingOutputInfo(),
+        }));
+
+        // The speaker device rather than getOutputSinkInfo(): the beep plays
+        // out of the `audiooutput` element, so the ring output sink says
+        // nothing about where it would have been heard.
+        this._emit(
+          "callwaiting.tone.error",
+          this,
+          new Error("AudioContext is not running"),
+          this._getMediaElementSinkId("audiooutput")
+        );
+
+        return;
+      }
+
+      const config = this._config.channels.ringer.callWaiting;
+      const context = this._audioContext;
+      // Read after the resume settled, not before it - the clock has moved on.
+      const now = context.currentTime;
+      const fadeIn = config.fadeIn;
+      const fadeOut = config.fadeOut;
+      // The fades are part of the beep, not additions to it, so a duration
+      // shorter than both of them together would ramp down before it was up.
+      const duration = Math.max(config.duration, fadeIn + fadeOut);
+
+      const oscillator = this._shimCreateOscillator(context);
+      const envelope = this._shimCreateGain(context);
+
+      oscillator.type = config.type;
+      oscillator.frequency.value = config.frequency;
+
+      // Shape only - the level is `callWaitingGain`, the way every other
+      // channel keeps its volume on a node of its own rather than baked into
+      // the envelope.
+      envelope.gain.setValueAtTime(0, now);
+      envelope.gain.linearRampToValueAtTime(1, now + fadeIn);
+      envelope.gain.setValueAtTime(1, now + duration - fadeOut);
+      envelope.gain.linearRampToValueAtTime(0, now + duration);
+
+      oscillator.connect(envelope);
+      envelope.connect(this._outputAudio.callWaitingGain);
+
+      oscillator.onended = () => {
+        oscillator.disconnect();
+        envelope.disconnect();
+      };
+
+      oscillator.start(now);
+      // A small margin past the ramp so the stop lands on real silence.
+      oscillator.stop(now + duration + 0.005);
+
+      // Logged with the output state, not just "played": everything above can
+      // succeed and still be inaudible if the element carrying the tones
+      // stream is paused, muted or pointed somewhere else.
+      this._callWaitingLog("beep.played", () => ({
+        frequency: config.frequency,
+        duration,
+        waiting: this._ringerAudio.waiting.map((entry) => entry.id),
+        output: this._callWaitingOutputInfo(),
+      }));
+
+      this._emit("callwaiting.tone.played", this);
+    });
+  }
+
+  // Brings whatever survived the config merge into a shape the beep can be
+  // built from without throwing - an unknown oscillator type or a NaN
+  // frequency would take out the tone entirely, and there is no fallback.
+  // The ringtones section's own gate. Unlike `alertInfo` and `callWaiting`
+  // below, an unusable value falls back to *shown* rather than hidden: those
+  // two carry behaviour, so refusing to enable what couldn't be parsed is the
+  // safe answer, whereas this is only a display gate whose default is true -
+  // and hiding it would take the ringtone selector, the preview button and
+  // the Alert-Info mappings with it, silently. Same reasoning as `selected`
+  // in _initProperties(): a bad value falls back to the default, it doesn't
+  // switch the feature off.
+  _normalizeRingtonesConfig() {
+    const ringer = this._config.channels.ringer;
+
+    // As with `files` and `alertInfo`: lwpUtils.merge overwrites with an
+    // explicit null, and the template reads `ringtones.show` through it.
+    if (!ringer.ringtones || typeof ringer.ringtones != "object") {
+      ringer.ringtones = { show: true };
+    }
+
+    // An object carrying no `show` of its own means the default too, not
+    // hidden - the same fallback as above, reached by a host replacing the
+    // subtree with a partial object rather than with a bad value.
+    ringer.ringtones.show =
+      ringer.ringtones.show === undefined ? true : !!ringer.ringtones.show;
+  }
+
+  _normalizeCallWaitingConfig() {
+    const ringer = this._config.channels.ringer;
+
+    // As with `files` and `alertInfo`: lwpUtils.merge overwrites with an
+    // explicit null, and everything below assumes an object.
+    if (!ringer.callWaiting || typeof ringer.callWaiting != "object") {
+      ringer.callWaiting = { enabled: false, show: false };
+    }
+
+    const callWaiting = ringer.callWaiting;
+    const number = (value, fallback, min = 0) => {
+      value = Number(value);
+
+      return isFinite(value) && value >= min ? value : fallback;
+    };
+
+    callWaiting.enabled = !!callWaiting.enabled;
+    callWaiting.show = !!callWaiting.show;
+
+    // The bounds first - the interval is clamped against them.
+    callWaiting.intervalMin = number(callWaiting.intervalMin, 10, 1);
+    callWaiting.intervalMax = Math.max(
+      number(callWaiting.intervalMax, 60, 1),
+      callWaiting.intervalMin
+    );
+    callWaiting.interval = this._clampCallWaitingInterval(
+      callWaiting.interval,
+      30
+    );
+
+    callWaiting.volume = Math.min(number(callWaiting.volume, 0.25), 1);
+    callWaiting.frequency = number(callWaiting.frequency, 440, 1);
+    callWaiting.duration = number(callWaiting.duration, 0.25, 0.01);
+    callWaiting.fadeIn = number(callWaiting.fadeIn, 0.01);
+    callWaiting.fadeOut = number(callWaiting.fadeOut, 0.02);
+
+    if (
+      !["sine", "square", "sawtooth", "triangle"].includes(callWaiting.type)
+    ) {
+      callWaiting.type = "sine";
+    }
+  }
+
+  // Always returns a usable interval: an unusable value falls back, and the
+  // result is clamped into [intervalMin, intervalMax] rather than rejected.
+  _clampCallWaitingInterval(seconds, fallback) {
+    const callWaiting = this._config.channels.ringer.callWaiting;
+
+    let value = Number(seconds);
+
+    if (!isFinite(value)) {
+      value = Number(fallback);
+    }
+
+    if (!isFinite(value)) {
+      value = callWaiting.intervalMin;
+    }
+
+    return Math.min(
+      Math.max(value, callWaiting.intervalMin),
+      callWaiting.intervalMax
+    );
   }
 
   _findRingtone(id) {

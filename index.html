@@ -491,7 +491,10 @@
             gap: 6px;
         }
 
-        .panel-column fieldset div {
+        /* Unlabelled rows inside a fieldset - a list of radios, or the
+           Alert-Info "add a mapping" toolbar. Labelled rows are left to the
+           rule above, which is what gives them their spacing. */
+        .panel-column fieldset div:not(:has(> label)) {
             display: flex;
             align-items: center;
             gap: 6px;
@@ -597,6 +600,13 @@
             padding: 10px 12px;
         }
 
+        /* Sections stacked in a column (the Alert-Info mappings under the
+           ringtone selector, the Media Devices lists) need separating from
+           whatever sits above them - the reset leaves fieldsets flush. */
+        .panel-column fieldset:not(:first-child) {
+            margin-top: 10px;
+        }
+
         .panel-column legend {
             display: block;
             font-size: 10.5px;
@@ -605,6 +615,23 @@
             letter-spacing: 0.05em;
             color: var(--text-faint);
             margin-bottom: 6px;
+        }
+
+        /* These two panels hold a single section each, and their own header
+           already names it - so the section's border and legend would only
+           box up the whole panel and repeat its title. Dropped here rather
+           than in the component, which still renders both for host apps that
+           put the section among others. The child selector keeps the
+           Alert-Info fieldset nested inside intact. */
+        #audio_context_ringtones > div > fieldset,
+        #audio_context_callwaiting > div > fieldset {
+            border: none;
+            padding: 0;
+        }
+
+        #audio_context_ringtones > div > fieldset > legend,
+        #audio_context_callwaiting > div > fieldset > legend {
+            display: none;
         }
 
         .panel-column button {
@@ -1473,7 +1500,7 @@
             <div class="panel-header">Audio Mixer</div>
             <div class="tabs">
                 <button type="button" class="tab-btn active" data-tab="default">Default</button>
-                <button type="button" class="tab-btn" data-tab="tweaked">Tweaked</button>
+                <button type="button" class="tab-btn" data-tab="tweaked">Master &amp; Call Only (tweaked)</button>
                 <button type="button" class="tab-btn" data-tab="custom">Custom</button>
             </div>
             <div class="tab-panels">
@@ -1520,6 +1547,28 @@
                   webphone.getAudioContext().renderAddTarget(customConfig);
                 }
                     </script>
+                </div>
+            </div>
+        </div>
+
+        <!-- Ringtones and Call Waiting. Both are the same audioContext
+             component as the mixer above, each rendered into a target that
+             names the section it wants - see the audioContext.renderTargets
+             entries in config.json. -->
+        <div class="panel">
+            <div class="panel-header">Ringtones</div>
+            <div class="panel-columns panel-columns--single">
+                <div class="panel-column">
+                    <div id="audio_context_ringtones"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">Call Waiting</div>
+            <div class="panel-columns panel-columns--single">
+                <div class="panel-column">
+                    <div id="audio_context_callwaiting"></div>
                 </div>
             </div>
         </div>

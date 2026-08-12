@@ -77,27 +77,50 @@
                         "alert-external": "ring01",
                         "door-phone": "ring09"
                     }
+                },
+                "callWaiting": {
+                    "enabled": true,
+                    "interval": 30
                 }
             }
         },
         "renderTargets": [
-            "audio_context",
+            {
+                "root": {
+                    "elementId": "audio_context"
+                },
+                "section": "volumes"
+            },
             {
                 "root": {
                     "elementId": "audio_context_tweaked"
                 },
+                "section": "volumes",
                 "data": {
-                    "input": {
-                        "local": {
+                    "channels": {
+                        "ringer": {
                             "show": false
-                        }
-                    },
-                    "output": {
+                        },
+                        "tones": {
+                            "show": false
+                        },
                         "preview": {
                             "show": false
                         }
                     }
                 }
+            },
+            {
+                "root": {
+                    "elementId": "audio_context_ringtones"
+                },
+                "section": "ringtones"
+            },
+            {
+                "root": {
+                    "elementId": "audio_context_callwaiting"
+                },
+                "section": "callwaiting"
             }
         ]
     },
