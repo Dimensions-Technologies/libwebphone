@@ -69,6 +69,17 @@
         ]
     },
     "audioContext": {
+        "channels": {
+            "ringer": {
+                "alertInfo": {
+                    "mappings": {
+                        "alert-internal": "ring03",
+                        "alert-external": "ring01",
+                        "door-phone": "ring09"
+                    }
+                }
+            }
+        },
         "renderTargets": [
             "audio_context",
             {

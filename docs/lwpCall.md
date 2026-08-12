@@ -178,6 +178,18 @@ Returns:
 | ------ | ----------------------------------------------------------------------------------------------------------------------- |
 | string | Returns "terminating" when the instance was started by the peer (server), and "originating" when started locally (user) |
 
+#### getAlertInfo()
+
+The raw `Alert-Info` header value(s) from the INVITE, in the order they appeared. A platform uses this header to mark what kind of call it is - `<alert-internal>` for an internal call, for example - and lwpAudioContext matches these values against its configured ringtone mappings to decide how the call rings (see [Alert-Info ringtones](/docs/lwpAudioContext.md#alert-info-ringtones)).
+
+Returns:
+
+| Type  | Description                                                                                                                                       |
+| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| array | The header values exactly as they arrived, brackets and all: `["<alert-internal>"]`. Empty for an outbound call, or an inbound one without the header |
+
+> JsSIP has no grammar rule for `Alert-Info`, so it is kept unparsed rather than being turned into a structured object - what comes back is what was on the wire.
+
 #### localIdentity(details)
 
 | Name    | Type    | Default | Description                                                                                      |
@@ -546,7 +558,7 @@ from the call and trigger a renegotiation.
 
 Returns an object with: callId, hasSession, progress, established, ended,
 held, isAudioMuted, isVideoMuted, primary, inConference, conferenceId,
-inTransfer, direction, terminating, originating, localIdentity,
+inTransfer, direction, terminating, originating, alertInfo, localIdentity,
 remoteIdentity, remoteIdentityOverride - see the corresponding
 getter/method above for each field's meaning.
 

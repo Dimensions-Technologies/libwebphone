@@ -4,6 +4,12 @@ import lwpUtils from "./lwpUtils";
 import lwpRenderer from "./lwpRenderer";
 import lwpRingtones from "./lwpRingtones";
 
+// The two platform-defined Alert-Info values. Named because the library refers
+// to them specifically - they get their own labelled controls in the default
+// template - unlike a customer's own keys, which it only ever matches.
+const INTERNAL_KEY = "alert-internal";
+const EXTERNAL_KEY = "alert-external";
+
 export default class extends lwpRenderer {
   constructor(libwebphone, config = {}) {
     super(libwebphone);
@@ -233,23 +239,35 @@ export default class extends lwpRenderer {
     }, (duration + 0.5) * 1000);
   }
 
-  startRinging(requestId = null) {
+  // `ringtoneId` overrides the selected ringtone for this call - how an
+  // Alert-Info mapping reaches the ringer (see getRingtoneForAlertInfo()).
+  // A call arriving while another is already ringing queues behind it rather
+  // than swapping the ringtone under it, and takes the ringer over with its
+  // own ringtone once the calls ahead of it are gone - see _resettleRinging().
+  startRinging(requestId = null, ringtoneId = null) {
     this.startAudioContext();
 
     if (this.isRingtonePreviewActive()) {
       this.stopRingtonePreview();
     }
 
+    // Settled as the call arrives rather than as it reaches the front of the
+    // queue, so a selectRingtone() while it waits its turn takes effect from
+    // the next ring rather than changing what this one ends up ringing with.
+    const settled =
+      ringtoneId && this._findRingtone(ringtoneId)
+        ? ringtoneId
+        : this._config.channels.ringer.selected;
+
     if (!requestId) {
-      this._ringerAudio.calls.push(null);
-    } else if (!this._ringerAudio.calls.includes(requestId)) {
-      this._ringerAudio.calls.push(requestId);
+      this._ringerAudio.calls.push({ id: null, ringtoneId: settled });
+    } else if (this._ringingCallIndex(requestId) == -1) {
+      this._ringerAudio.calls.push({ id: requestId, ringtoneId: settled });
     }
 
-    // Read once per ring session, so a selectRingtone() during a ring takes
-    // effect from the next one rather than swapping mid-ring.
     if (!this._ringerAudio.ringerConnected) {
       this._ringerAudio.ringerConnected = true;
+      this._ringerAudio.activeId = this._ringerAudio.calls[0].ringtoneId;
       this._startRinging();
     }
   }
@@ -259,7 +277,7 @@ export default class extends lwpRenderer {
       requestId = null;
     }
 
-    const requestIndex = this._ringerAudio.calls.indexOf(requestId);
+    const requestIndex = this._ringingCallIndex(requestId);
 
     if (requestIndex != -1) {
       this._ringerAudio.calls.splice(requestIndex, 1);
@@ -267,7 +285,12 @@ export default class extends lwpRenderer {
 
     if (this._ringerAudio.calls.length == 0) {
       this.stopAllRinging();
+
+      return;
     }
+
+    // Still ringing for somebody else - hand the ringer to whoever is next.
+    this._resettleRinging();
   }
 
   stopAllRinging() {
@@ -284,8 +307,14 @@ export default class extends lwpRenderer {
       this._ringerAudio.playing = null;
     }
 
-    // Warm the next ring's buffer, picking up any mid-ring selection.
+    // Cleared before pruning, so a mapped ringtone this session decoded is
+    // dropped unless it's reachable in its own right (prewarmed, or selected).
+    this._ringerAudio.activeId = null;
+    this._pruneRingtoneBuffers();
+
+    // Warm the next ring's buffers, picking up any mid-ring selection.
     this._ensureRingtoneBuffer(this._config.channels.ringer.selected);
+    this._prewarmAlertInfoRingtones();
   }
 
   getRingtones() {
@@ -318,7 +347,139 @@ export default class extends lwpRenderer {
     this.updateRenders();
   }
 
-  previewRingtone(id = null) {
+  // The Alert-Info ringtone mappings, in the order they are matched against an
+  // incoming call. The built-in platform keys come first, in the order they
+  // are configured, so a custom mapping can never shadow one.
+  getAlertInfoMappings() {
+    const alertInfo = this._config.channels.ringer.alertInfo;
+
+    return this._alertInfoKeys().map((key) => {
+      return {
+        key: key,
+        ringtone: alertInfo.mappings[key] || null,
+        builtin: this._isBuiltinAlertInfoKey(key),
+      };
+    });
+  }
+
+  // The ringtone mapped to a key, or null where the mapping exists but is
+  // unset (meaning "whatever is selected") as well as where there is no
+  // mapping at all - the two behave identically when a call arrives.
+  getAlertInfoRingtone(key) {
+    const mappings = this._config.channels.ringer.alertInfo.mappings;
+    const normalized = this._normalizeAlertInfoKey(key);
+
+    return (normalized && mappings[normalized]) || null;
+  }
+
+  // Maps an Alert-Info value to a ringtone, adding the mapping if it's new.
+  // A null/empty ringtoneId clears it back to the selected ringtone rather
+  // than removing the mapping, so a built-in row can be reset without
+  // disappearing from the UI.
+  //
+  // Returns whether the arguments were usable, so a UI can tell a rejected
+  // input from one that simply asked for what was already true - both leave
+  // the mappings alone, but only one of them is the user's mistake.
+  setAlertInfoRingtone(key, ringtoneId = null) {
+    const alertInfo = this._config.channels.ringer.alertInfo;
+    const normalized = this._normalizeAlertInfoKey(key);
+
+    if (!normalized) {
+      return false;
+    }
+
+    // Unlike an unset mapping, an id that doesn't resolve is a mistake -
+    // refuse it rather than silently storing something that will never play.
+    if (ringtoneId && !this._findRingtone(ringtoneId)) {
+      return false;
+    }
+
+    const ringtone = ringtoneId || null;
+    const existing = Object.prototype.hasOwnProperty.call(
+      alertInfo.mappings,
+      normalized
+    );
+
+    if (existing && alertInfo.mappings[normalized] === ringtone) {
+      return true;
+    }
+
+    alertInfo.mappings[normalized] = ringtone;
+
+    if (ringtone && alertInfo.prewarm) {
+      this._ensureRingtoneBuffer(ringtone);
+    }
+
+    // Whatever this key used to point at may now be unreachable.
+    this._pruneRingtoneBuffers();
+
+    this._emit("channel.ringer.alertinfo.changed", this, normalized, ringtone);
+    this.updateRenders();
+
+    return true;
+  }
+
+  // Removes a custom mapping entirely. The built-in platform keys are fixed
+  // rows - clear them with setAlertInfoRingtone(key, null) instead.
+  //
+  // Returns false only where the removal was refused (an unusable key, or a
+  // built-in one). A key that simply isn't mapped is true: the caller asked
+  // for no mapping under it and that is the state they get.
+  removeAlertInfoMapping(key) {
+    const alertInfo = this._config.channels.ringer.alertInfo;
+    const normalized = this._normalizeAlertInfoKey(key);
+
+    if (!normalized || this._isBuiltinAlertInfoKey(normalized)) {
+      return false;
+    }
+
+    if (!Object.prototype.hasOwnProperty.call(alertInfo.mappings, normalized)) {
+      return true;
+    }
+
+    delete alertInfo.mappings[normalized];
+
+    this._pruneRingtoneBuffers();
+
+    this._emit("channel.ringer.alertinfo.removed", this, normalized);
+    this.updateRenders();
+
+    return true;
+  }
+
+  // Which ringtone an inbound call carrying these Alert-Info header values
+  // should ring with. Always resolves to something playable: an unmatched
+  // call, an unset mapping and a mapping left pointing at a ringtone that no
+  // longer exists all fall back to the selected ringtone.
+  getRingtoneForAlertInfo(alertInfo = []) {
+    const config = this._config.channels.ringer.alertInfo;
+    const selected = this._config.channels.ringer.selected;
+
+    if (!config.enabled) {
+      return selected;
+    }
+
+    const key = this._matchAlertInfoKey(alertInfo);
+
+    if (!key) {
+      return selected;
+    }
+
+    const mapped = config.mappings[key];
+
+    if (!mapped || !this._findRingtone(mapped)) {
+      return selected;
+    }
+
+    return mapped;
+  }
+
+  // `source` is which control owns the preview - null for the ringtone
+  // selector, an Alert-Info key for one of the mapping rows, and whatever
+  // token a host application passes for a control of its own. Only the owner
+  // reports itself as playing, so two controls pointing at the same ringtone
+  // don't light up together. Compared with ===, so any value works as a token.
+  previewRingtone(id = null, source = null) {
     const ringtoneId = id || this._config.channels.ringer.selected;
     const ringtone = this._findRingtone(ringtoneId);
 
@@ -341,6 +502,7 @@ export default class extends lwpRenderer {
 
     this._ringerAudio.previewActive = true;
     this._ringerAudio.previewId = ringtoneId;
+    this._ringerAudio.previewSource = source;
 
     Promise.all([
       this._resumeAudioContext(),
@@ -374,7 +536,7 @@ export default class extends lwpRenderer {
       this.stopRingtonePreview();
     }, this._config.channels.ringer.previewDuration * 1000);
 
-    this._emit("ringtone.preview.started", this, ringtoneId);
+    this._emit("ringtone.preview.started", this, ringtoneId, source);
     this.updateRenders();
   }
 
@@ -391,8 +553,13 @@ export default class extends lwpRenderer {
       this._ringerAudio.previewTimer = null;
     }
 
+    // Reported with the "stopped" event below, so a host application's button
+    // knows whether the preview that just ended was its own.
+    const source = this._ringerAudio.previewSource;
+
     this._ringerAudio.previewActive = false;
     this._ringerAudio.previewId = null;
+    this._ringerAudio.previewSource = null;
 
     this._stopRingerSource(this._ringerAudio.previewPlaying);
     this._ringerAudio.previewPlaying = null;
@@ -401,20 +568,47 @@ export default class extends lwpRenderer {
     // one.
     this._pruneRingtoneBuffers();
 
-    this._emit("ringtone.preview.stopped", this);
+    this._emit("ringtone.preview.stopped", this, source);
     this.updateRenders();
   }
 
-  toggleRingtonePreview(id = null) {
-    if (this.isRingtonePreviewActive()) {
+  // The one call a preview button needs: pressing the control that started
+  // the preview stops it, pressing a different one switches the preview to
+  // that control's ringtone rather than merely stopping the first. Pass the
+  // same `source` for every press of a given button - the default of null
+  // belongs to the ringtone selector.
+  toggleRingtonePreview(id = null, source = null) {
+    if (this.isRingtonePreviewActive(source)) {
       this.stopRingtonePreview();
-    } else {
-      this.previewRingtone(id);
+
+      return;
     }
+
+    this.previewRingtone(id, source);
   }
 
-  isRingtonePreviewActive() {
-    return !!this._ringerAudio.previewActive;
+  // With no argument: whether any preview is playing. With one: whether the
+  // preview playing is the one `source` started, which is what a button
+  // showing "Stop" should ask - `isRingtonePreviewActive(null)` is the
+  // ringtone selector's own preview, not "any".
+  isRingtonePreviewActive(source = undefined) {
+    if (!this._ringerAudio.previewActive) {
+      return false;
+    }
+
+    return source === undefined || this._ringerAudio.previewSource === source;
+  }
+
+  // Which control owns the preview that's playing: null for the ringtone
+  // selector, an Alert-Info key for a mapping row, or whatever token a host
+  // application passed. undefined when nothing is playing - distinguishing
+  // that from the selector's null is why this isn't simply null.
+  getRingtonePreviewSource() {
+    if (!this._ringerAudio.previewActive) {
+      return undefined;
+    }
+
+    return this._ringerAudio.previewSource;
   }
 
   // True from the moment startRinging() is called, including while the resume
@@ -528,6 +722,15 @@ export default class extends lwpRenderer {
         ringtone: "Ringtone",
         ringtonepreview: "Preview",
         ringtonepreviewstop: "Stop",
+        alertinfointernal: "Internal Call Ringtone",
+        alertinfoexternal: "External Call Ringtone",
+        alertinfocustom: "Custom Alert-Info Ringtones",
+        alertinfoempty: "No custom mappings yet",
+        alertinfodefault: "Use selected ringtone",
+        alertinfokey: "Alert-Info value",
+        alertinfoinvalid: "Enter a valid Alert-Info value",
+        alertinfoadd: "Add",
+        alertinforemove: "Remove",
         tonesvolume: "Tones Volume",
         previewvolume: "Preview Volume",
         remotevolume: "Call Volume",
@@ -562,6 +765,43 @@ export default class extends lwpRenderer {
             : lwpRingtones.length > 0
             ? lwpRingtones[0].id
             : null,
+          // Per-Alert-Info ringtones: an inbound INVITE carrying a matching
+          // Alert-Info header rings with its own ringtone instead of
+          // `selected`. See getRingtoneForAlertInfo().
+          alertInfo: {
+            // Whether an incoming call's Alert-Info is consulted at all. The
+            // mappings stay editable either way, so a host app can build the
+            // UI before deciding to switch the behaviour on.
+            enabled: true,
+            show: true,
+            // "token" matches the key as a whole word anywhere in the header
+            // value, which covers both the bare `<alert-internal>` form and a
+            // URI form like `<sip:x@pbx>;info=door-phone`. "exact" compares
+            // the whole value, after stripping the surrounding <> - without
+            // that it would never match a real INVITE.
+            matchMode: "token",
+            // Optional (alertInfoValues, mappings) => key | null, replacing
+            // the matching above entirely for hosts with their own rules.
+            matcher: null,
+            // Decode mapped ringtones ahead of the first call that needs one,
+            // rather than making that call wait on decodeAudioData. Costs
+            // roughly half a megabyte of memory per *distinct* mapped
+            // ringtone, so it stays proportional to how many the host has
+            // actually configured.
+            prewarm: true,
+            // Rendered as fixed rows that can't be renamed or removed - these
+            // are platform-defined, unlike whatever a customer adds.
+            builtin: [INTERNAL_KEY, EXTERNAL_KEY],
+            // key -> ringtone id, or null for "use the selected ringtone".
+            // An object rather than an array so a host app's config merges
+            // key-by-key (lodash merge would combine arrays by index - the
+            // same trap documented on `files` above), and so insertion order
+            // gives a stable match precedence.
+            mappings: {
+              [INTERNAL_KEY]: null,
+              [EXTERNAL_KEY]: null,
+            },
+          },
           // How long previewRingtone() plays before auto-stopping itself
           previewDuration: 8,
           // Seconds. These avoid the click a hard start/stop makes
@@ -642,6 +882,8 @@ export default class extends lwpRenderer {
           ? this._config.channels.ringer.files[0].id
           : null;
     }
+
+    this._normalizeAlertInfoConfig();
 
     this._audioContext = this._shimAudioContext();
   }
@@ -798,6 +1040,8 @@ export default class extends lwpRenderer {
   _initRingAudio() {
     this._ringerAudio = {};
 
+    // The ring queue: `{ id, ringtoneId }` per call wanting the ringer, in
+    // arrival order. The one at the front owns it - see _resettleRinging().
     this._ringerAudio.calls = [];
 
     this._ringerAudio.ringerConnected = false;
@@ -809,17 +1053,24 @@ export default class extends lwpRenderer {
     // The source/envelope pair currently ringing.
     this._ringerAudio.playing = null;
 
+    // The ringtone the call at the front of the queue settled on, i.e. what
+    // is ringing right now - see startRinging() and _resettleRinging().
+    this._ringerAudio.activeId = null;
+
     // Invalidates an in-flight _startRinging() whose resume/decode hasn't
     // settled yet - see stopAllRinging().
     this._ringerAudio.generation = 0;
 
     this._ringerAudio.previewActive = false;
     this._ringerAudio.previewId = null;
+    // Which control started the preview - see previewRingtone().
+    this._ringerAudio.previewSource = null;
     this._ringerAudio.previewPlaying = null;
     this._ringerAudio.previewTimer = null;
     this._ringerAudio.previewToken = 0;
 
     this._ensureRingtoneBuffer(this._config.channels.ringer.selected);
+    this._prewarmAlertInfoRingtones();
   }
 
   _initTonesAudio() {
@@ -862,7 +1113,22 @@ export default class extends lwpRenderer {
 
   _initEventBindings() {
     this._libwebphone.on("call.ringing.started", (lwp, call) => {
-      this.startRinging(call.getId());
+      // Resolved here rather than inside startRinging() so a host app calling
+      // startRinging() by hand keeps the behaviour it always had.
+      let ringtoneId = null;
+
+      try {
+        ringtoneId = this.getRingtoneForAlertInfo(call.getAlertInfo());
+      } catch (error) {
+        // Ringing matters more than ringing with the right ringtone: a throw
+        // escaping here would take out every listener after this one (the
+        // emit loop is synchronous) and leave the call silent. A host matcher
+        // is caught closer to the throw, in _matchAlertInfoKey - this is the
+        // backstop for everything else. null rings with the selected ringtone.
+        this._emit("channel.ringer.alertinfo.error", this, error);
+      }
+
+      this.startRinging(call.getId(), ringtoneId);
     });
     this._libwebphone.on("call.ringing.stopped", (lwp, call) => {
       this.stopRinging(call.getId());
@@ -1040,6 +1306,15 @@ export default class extends lwpRenderer {
         ringtone: "libwebphone:audioContext.ringtone",
         ringtonepreview: "libwebphone:audioContext.ringtonepreview",
         ringtonepreviewstop: "libwebphone:audioContext.ringtonepreviewstop",
+        alertinfointernal: "libwebphone:audioContext.alertinfointernal",
+        alertinfoexternal: "libwebphone:audioContext.alertinfoexternal",
+        alertinfocustom: "libwebphone:audioContext.alertinfocustom",
+        alertinfoempty: "libwebphone:audioContext.alertinfoempty",
+        alertinfodefault: "libwebphone:audioContext.alertinfodefault",
+        alertinfokey: "libwebphone:audioContext.alertinfokey",
+        alertinfoinvalid: "libwebphone:audioContext.alertinfoinvalid",
+        alertinfoadd: "libwebphone:audioContext.alertinfoadd",
+        alertinforemove: "libwebphone:audioContext.alertinforemove",
         tonesvolume: "libwebphone:audioContext.tonesvolume",
         previewvolume: "libwebphone:audioContext.previewvolume",
         remotevolume: "libwebphone:audioContext.remotevolume",
@@ -1075,7 +1350,79 @@ export default class extends lwpRenderer {
         ringtonepreview: {
           events: {
             onclick: () => {
+              // null is this button's ownership token - see
+              // previewRingtone(). A preview started from one of the
+              // Alert-Info rows switches here rather than just stopping.
               this.toggleRingtonePreview();
+            },
+          },
+        },
+        alertinfointernal: {
+          events: {
+            onchange: (event) => {
+              const element = event.srcElement;
+              // "" is the "use selected ringtone" option, which
+              // setAlertInfoRingtone() reads as clearing the mapping.
+              this.setAlertInfoRingtone(INTERNAL_KEY, element.value);
+            },
+          },
+        },
+        alertinfointernalpreview: {
+          events: {
+            onclick: () => {
+              this._previewAlertInfoRingtone(INTERNAL_KEY);
+            },
+          },
+        },
+        alertinfoexternal: {
+          events: {
+            onchange: (event) => {
+              const element = event.srcElement;
+              this.setAlertInfoRingtone(EXTERNAL_KEY, element.value);
+            },
+          },
+        },
+        alertinfoexternalpreview: {
+          events: {
+            onclick: () => {
+              this._previewAlertInfoRingtone(EXTERNAL_KEY);
+            },
+          },
+        },
+        alertinfoadd: {
+          events: {
+            // The renderer appends the render to every handler's arguments,
+            // which is how this reaches the two inputs it belongs with.
+            onclick: (event, render) => {
+              const keyElement = render.by_id.alertinfokey.element;
+              const ringtoneElement = render.by_id.alertinforingtone.element;
+
+              if (!keyElement || !ringtoneElement) {
+                return;
+              }
+
+              // Trimmed in place, so a whitespace-only entry reads as the
+              // empty value it normalises to.
+              keyElement.value = keyElement.value.trim();
+
+              // No need to clear the inputs afterwards: adding re-renders the
+              // target, and a rejected key (empty, or a ringtone that doesn't
+              // resolve) is better left in place for the user to correct.
+              const added = this.setAlertInfoRingtone(
+                keyElement.value,
+                ringtoneElement.value
+              );
+
+              // Nothing happened and nothing re-rendered, so say so through
+              // the input's own validity state rather than a message element
+              // the host never asked for. Deliberately not the `required`
+              // attribute: this template can be rendered inside a host's own
+              // <form>, and an empty box here must not block that form.
+              this._setAlertInfoKeyValidity(keyElement, added ? null : render);
+
+              if (!added && typeof keyElement.reportValidity == "function") {
+                keyElement.reportValidity();
+              }
             },
           },
         },
@@ -1100,6 +1447,51 @@ export default class extends lwpRenderer {
             onchange: (event) => {
               const element = event.srcElement;
               this.changeVolume("remote", element.value);
+            },
+          },
+        },
+        // Inputs of the "add a mapping" row - both are read by alertinfoadd
+        // above rather than acting on their own.
+        alertinfokey: {
+          events: {
+            oninput: (event) => {
+              // Drop the rejection as soon as they start correcting it. A
+              // custom validity left set keeps the field :invalid, which
+              // would style it as wrong while they type and, inside a host's
+              // <form>, would block submitting it.
+              this._setAlertInfoKeyValidity(event.srcElement, null);
+            },
+          },
+        },
+        alertinforingtone: {},
+      },
+      by_name: {
+        // One name shared by every custom mapping row, the way lwpCallList
+        // handles its call list - by_id can't address a list that grows.
+        alertinfomapping: {
+          events: {
+            onchange: (event) => {
+              const element = event.srcElement;
+              // The row's key travels on the element: a <select>'s value is
+              // already spoken for by the ringtone it picks.
+              this.setAlertInfoRingtone(
+                element.getAttribute("data-alert-info"),
+                element.value
+              );
+            },
+          },
+        },
+        alertinfopreview: {
+          events: {
+            onclick: (event) => {
+              this._previewAlertInfoRingtone(event.srcElement.value);
+            },
+          },
+        },
+        alertinforemove: {
+          events: {
+            onclick: (event) => {
+              this.removeAlertInfoMapping(event.srcElement.value);
             },
           },
         },
@@ -1194,6 +1586,110 @@ export default class extends lwpRenderer {
             </div>
           {{/data.channels.ringer.show}}
 
+          {{#data.channels.ringer.alertInfo.show}}
+            {{#data.alertInfo.internal}}
+              <div>
+                <label for="{{by_id.alertinfointernal.elementId}}">
+                  {{i18n.alertinfointernal}}
+                </label>
+                <select id="{{by_id.alertinfointernal.elementId}}">
+                  <option value="">{{i18n.alertinfodefault}}</option>
+                  {{#ringtones}}
+                    <option value="{{id}}" {{#selected}}selected{{/selected}}>{{name}}</option>
+                  {{/ringtones}}
+                </select>
+                <button type="button" id="{{by_id.alertinfointernalpreview.elementId}}">
+                  {{#previewing}}{{i18n.ringtonepreviewstop}}{{/previewing}}
+                  {{^previewing}}{{i18n.ringtonepreview}}{{/previewing}}
+                </button>
+              </div>
+            {{/data.alertInfo.internal}}
+
+            {{#data.alertInfo.external}}
+              <div>
+                <label for="{{by_id.alertinfoexternal.elementId}}">
+                  {{i18n.alertinfoexternal}}
+                </label>
+                <select id="{{by_id.alertinfoexternal.elementId}}">
+                  <option value="">{{i18n.alertinfodefault}}</option>
+                  {{#ringtones}}
+                    <option value="{{id}}" {{#selected}}selected{{/selected}}>{{name}}</option>
+                  {{/ringtones}}
+                </select>
+                <button type="button" id="{{by_id.alertinfoexternalpreview.elementId}}">
+                  {{#previewing}}{{i18n.ringtonepreviewstop}}{{/previewing}}
+                  {{^previewing}}{{i18n.ringtonepreview}}{{/previewing}}
+                </button>
+              </div>
+            {{/data.alertInfo.external}}
+
+            <fieldset>
+              <legend>{{i18n.alertinfocustom}}</legend>
+
+              {{#data.alertInfo.hasCustom}}
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">{{i18n.alertinfokey}}</th>
+                      <th scope="col">{{i18n.ringtone}}</th>
+                      <th scope="col"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {{#data.alertInfo.custom}}
+                      <tr>
+                        {{! A row header, not a cell: it is what names the
+                            controls beside it, so a screen reader announces
+                            which mapping a Preview or Remove belongs to
+                            without every button needing a label of its own. }}
+                        <th scope="row">{{key}}</th>
+                        <td>
+                          <select name="{{by_name.alertinfomapping.elementName}}" data-alert-info="{{key}}" aria-label="{{i18n.ringtone}}">
+                            <option value="">{{i18n.alertinfodefault}}</option>
+                            {{#ringtones}}
+                              <option value="{{id}}" {{#selected}}selected{{/selected}}>{{name}}</option>
+                            {{/ringtones}}
+                          </select>
+                        </td>
+                        <td>
+                          <button type="button" name="{{by_name.alertinfopreview.elementName}}" value="{{key}}">
+                            {{#previewing}}{{i18n.ringtonepreviewstop}}{{/previewing}}
+                            {{^previewing}}{{i18n.ringtonepreview}}{{/previewing}}
+                          </button>
+                          {{#removable}}
+                            <button type="button" name="{{by_name.alertinforemove.elementName}}" value="{{key}}">
+                              {{i18n.alertinforemove}}
+                            </button>
+                          {{/removable}}
+                        </td>
+                      </tr>
+                    {{/data.alertInfo.custom}}
+                  </tbody>
+                </table>
+              {{/data.alertInfo.hasCustom}}
+
+              {{^data.alertInfo.hasCustom}}
+                <p>{{i18n.alertinfoempty}}</p>
+              {{/data.alertInfo.hasCustom}}
+
+              <div>
+                {{! Labelled with aria-label rather than a <label>: the row is
+                    a compact toolbar, and a placeholder is not an accessible
+                    name (it disappears as soon as anything is typed). }}
+                <input type="text" id="{{by_id.alertinfokey.elementId}}" placeholder="{{i18n.alertinfokey}}" aria-label="{{i18n.alertinfokey}}">
+                <select id="{{by_id.alertinforingtone.elementId}}" aria-label="{{i18n.ringtone}}">
+                  <option value="">{{i18n.alertinfodefault}}</option>
+                  {{#data.alertInfo.ringtones}}
+                    <option value="{{id}}">{{name}}</option>
+                  {{/data.alertInfo.ringtones}}
+                </select>
+                <button type="button" id="{{by_id.alertinfoadd.elementId}}">
+                  {{i18n.alertinfoadd}}
+                </button>
+              </div>
+            </fieldset>
+          {{/data.channels.ringer.alertInfo.show}}
+
         </div>
         `;
   }
@@ -1215,9 +1711,62 @@ export default class extends lwpRenderer {
       };
     });
 
-    data.ringtonePreviewActive = this.isRingtonePreviewActive();
+    // The selector's own preview, not any preview - a preview started from an
+    // Alert-Info row leaves this false.
+    data.ringtonePreviewActive = this.isRingtonePreviewActive(null);
+    data.alertInfo = this._renderAlertInfoData();
 
     return data;
+  }
+
+  // The two platform keys get their own labelled rows in the default template,
+  // so they're split out here; everything else - including any further key a
+  // host app declared built-in - falls into `custom`, where only genuinely
+  // custom entries offer a remove button. Matching itself doesn't know the
+  // difference (see _matchAlertInfoKey), this is presentation only.
+  _renderAlertInfoData() {
+    const ringtones = this.getRingtones();
+    const mappings = this.getAlertInfoMappings().map((mapping) => {
+      return {
+        key: mapping.key,
+        ringtone: mapping.ringtone,
+        builtin: mapping.builtin,
+        removable: !mapping.builtin,
+        // Whether *this row* started the preview, not whether its ringtone
+        // happens to be the one playing - rows sharing a ringtone would
+        // otherwise all show themselves as playing.
+        previewing: this.isRingtonePreviewActive(mapping.key),
+        ringtones: ringtones.map((ringtone) => {
+          return {
+            id: ringtone.id,
+            name: ringtone.name,
+            selected: ringtone.id === mapping.ringtone,
+          };
+        }),
+      };
+    });
+    const isPlatformKey = (mapping) => {
+      return mapping.key === INTERNAL_KEY || mapping.key === EXTERNAL_KEY;
+    };
+    const custom = mappings.filter((mapping) => {
+      return !isPlatformKey(mapping);
+    });
+
+    return {
+      internal: mappings.find((mapping) => {
+        return mapping.key === INTERNAL_KEY;
+      }),
+      external: mappings.find((mapping) => {
+        return mapping.key === EXTERNAL_KEY;
+      }),
+      custom: custom,
+      // The template needs a plain boolean: a section on `custom` itself
+      // repeats per row, which is not what "show the table" means.
+      hasCustom: custom.length > 0,
+      // Nothing preselected - these are the options of the "add a mapping"
+      // row, not of an existing one.
+      ringtones: ringtones,
+    };
   }
 
   /** Helper functions */
@@ -1376,13 +1925,28 @@ export default class extends lwpRenderer {
   }
 
   // decodeAudioData resamples to the context's rate, so a 3s ringtone costs
-  // roughly half a megabyte decoded. Keep only what's reachable - selected
-  // plus previewing - rather than all of channels.ringer.files.
+  // roughly half a megabyte decoded. Keep only what's reachable - selected,
+  // previewing, the ring in progress and (when prewarming) the Alert-Info
+  // mappings - rather than all of channels.ringer.files.
   _pruneRingtoneBuffers() {
+    const alertInfo = this._config.channels.ringer.alertInfo;
     const keep = [
       this._config.channels.ringer.selected,
       this._ringerAudio.previewId,
+      // A mapped ringtone decoded on demand for the current ring: without
+      // this a prune mid-ring would drop the buffer that ring is using, and
+      // the next one would have to decode it again.
+      this._ringerAudio.activeId,
+      // Same for the calls queued behind it, so taking the ringer over is a
+      // buffer already in hand rather than another decode.
+      ...this._ringerAudio.calls.map((entry) => {
+        return entry.ringtoneId;
+      }),
     ];
+
+    if (alertInfo.enabled && alertInfo.prewarm) {
+      keep.push(...this._alertInfoRingtoneIds());
+    }
 
     Object.keys(this._ringerAudio.buffers).forEach((id) => {
       if (!keep.includes(id)) {
@@ -1472,17 +2036,51 @@ export default class extends lwpRenderer {
     source.stop(now + fadeOut + 0.005);
   }
 
+  // Where a call sits in the ring queue, by the id startRinging() was given.
+  // Calls started without one all share the id null, so they come off the
+  // queue in arrival order.
+  _ringingCallIndex(requestId) {
+    return this._ringerAudio.calls.findIndex((entry) => {
+      return entry.id === requestId;
+    });
+  }
+
+  // The ringer follows the call at the front of the queue, the way a desk
+  // phone does: a second call ringing behind the first is silent until the
+  // first is answered or gone, and only then is its own ringtone heard.
+  // Called when the queue changes, so it's a no-op unless the front of it did.
+  _resettleRinging() {
+    const next = this._ringerAudio.calls[0];
+
+    if (!next || next.ringtoneId === this._ringerAudio.activeId) {
+      return;
+    }
+
+    this._ringerAudio.activeId = next.ringtoneId;
+
+    // _startRinging() bumps the generation, so an attempt still waiting on a
+    // resume or decode can't land on top of this one - but the source already
+    // ringing is ours to stop.
+    this._stopRingerSource(this._ringerAudio.playing);
+    this._ringerAudio.playing = null;
+
+    this._startRinging();
+  }
+
   // Starts the ringtone once the context state and decoded buffer are both
   // known. Both are required with nothing to fall back to, so a failure of
   // either is reported rather than worked around - the statechange listener
   // in _initEventBindings() retries this if the context resumes later.
   _startRinging() {
     const generation = ++this._ringerAudio.generation;
-    const selected = this._config.channels.ringer.selected;
+    // Whatever the call at the front of the queue settled on - the selected
+    // ringtone unless an Alert-Info mapping overrode it.
+    const active =
+      this._ringerAudio.activeId || this._config.channels.ringer.selected;
 
     Promise.all([
       this._resumeAudioContext(),
-      this._ensureRingtoneBuffer(selected),
+      this._ensureRingtoneBuffer(active),
     ]).then(([running, buffer]) => {
       // stopAllRinging(), or a subsequent ring, landed while we were waiting.
       if (this._ringerAudio.generation !== generation) {
@@ -1515,6 +2113,235 @@ export default class extends lwpRenderer {
     return this._config.channels.ringer.files.find((file) => {
       return file.id === id;
     });
+  }
+
+  // Brings whatever survived the config merge into the shape the rest of the
+  // class assumes: every built-in key present (so it always has a UI row),
+  // every key normalized, and no mapping left pointing at a ringtone that
+  // isn't in `files`. Runs before _ringerAudio exists, so it can't decode
+  // anything - prewarming happens in _initRingAudio().
+  _normalizeAlertInfoConfig() {
+    const ringer = this._config.channels.ringer;
+
+    // As with `files` above: lwpUtils.merge overwrites with an explicit null.
+    if (!ringer.alertInfo || typeof ringer.alertInfo != "object") {
+      ringer.alertInfo = { enabled: false, show: false };
+    }
+
+    const alertInfo = ringer.alertInfo;
+
+    if (!Array.isArray(alertInfo.builtin)) {
+      alertInfo.builtin = [];
+    }
+
+    if (!alertInfo.mappings || typeof alertInfo.mappings != "object") {
+      alertInfo.mappings = {};
+    }
+
+    alertInfo.builtin = alertInfo.builtin
+      .map((key) => {
+        return this._normalizeAlertInfoKey(key);
+      })
+      .filter((key, index, keys) => {
+        return key && keys.indexOf(key) === index;
+      });
+
+    // Rebuilt rather than edited in place: object key order is the match
+    // precedence, and seeding the built-ins first is what stops a customer's
+    // own mapping from being consulted before a platform one.
+    const mappings = {};
+
+    alertInfo.builtin.forEach((key) => {
+      mappings[key] = null;
+    });
+
+    Object.keys(alertInfo.mappings).forEach((key) => {
+      const normalized = this._normalizeAlertInfoKey(key);
+
+      if (!normalized) {
+        return;
+      }
+
+      const ringtone = alertInfo.mappings[key];
+
+      mappings[normalized] =
+        ringtone && this._findRingtone(ringtone) ? ringtone : null;
+    });
+
+    alertInfo.mappings = mappings;
+  }
+
+  // Every mapped key, built-ins first. Object key order already reflects that
+  // (see _normalizeAlertInfoConfig), but this doesn't depend on it - a host
+  // app writing straight to _config shouldn't be able to reorder matching.
+  _alertInfoKeys() {
+    const alertInfo = this._config.channels.ringer.alertInfo;
+    const keys = Object.keys(alertInfo.mappings);
+    const builtin = alertInfo.builtin.filter((key) => {
+      return keys.includes(key);
+    });
+
+    return builtin.concat(
+      keys.filter((key) => {
+        return !builtin.includes(key);
+      })
+    );
+  }
+
+  // Keys are stored stripped of the <> a SIP header wraps them in, so a
+  // customer typing `alert-internal` and one pasting `<alert-internal>` out of
+  // a packet capture end up with the same mapping.
+  _normalizeAlertInfoKey(key) {
+    if (typeof key != "string") {
+      return null;
+    }
+
+    let normalized = key.trim().toLowerCase();
+
+    if (normalized.startsWith("<") && normalized.endsWith(">")) {
+      normalized = normalized.slice(1, -1).trim();
+    }
+
+    // Assigning this key on a plain object is ignored by the engine, so the
+    // mapping would silently never exist - refuse it the way an empty key is
+    // refused. Other exotic names (constructor, prototype) are ordinary own
+    // properties and work; nothing here ever tests a key with `in`.
+    if (normalized === "__proto__") {
+      return null;
+    }
+
+    return normalized || null;
+  }
+
+  _isBuiltinAlertInfoKey(key) {
+    const normalized = this._normalizeAlertInfoKey(key);
+
+    return (
+      !!normalized &&
+      this._config.channels.ringer.alertInfo.builtin.includes(normalized)
+    );
+  }
+
+  // Marks the add row's key input as rejected, or clears it with a null
+  // `render`. The message goes on the input itself so the browser presents
+  // it: the template has no message element to write into, and adding one
+  // would impose a layout on the host. A render whose i18n omits the key
+  // (a host supplying its own) simply gets no message, never a broken one.
+  _setAlertInfoKeyValidity(element, render) {
+    if (!element || typeof element.setCustomValidity != "function") {
+      return;
+    }
+
+    const key = render ? (render.i18n || {}).alertinfoinvalid : null;
+    const translator = this._libwebphone.i18nTranslator();
+
+    element.setCustomValidity(
+      key && typeof translator == "function" ? translator(key) : ""
+    );
+  }
+
+  // The distinct ringtones the mappings point at - what prewarming decodes and
+  // what buffer pruning has to spare.
+  _alertInfoRingtoneIds() {
+    const mappings = this._config.channels.ringer.alertInfo.mappings;
+
+    return Object.keys(mappings)
+      .map((key) => {
+        return mappings[key];
+      })
+      .filter((id, index, ids) => {
+        return id && ids.indexOf(id) === index;
+      });
+  }
+
+  // Auditions what a call matching this key would actually ring with, which
+  // for an unset mapping is the selected ringtone. The key doubles as the
+  // row's ownership token, so each row's button tracks its own preview.
+  _previewAlertInfoRingtone(key) {
+    const normalized = this._normalizeAlertInfoKey(key);
+
+    if (!normalized) {
+      return;
+    }
+
+    this.toggleRingtonePreview(
+      this.getAlertInfoRingtone(normalized) ||
+        this._config.channels.ringer.selected,
+      normalized
+    );
+  }
+
+  _prewarmAlertInfoRingtones() {
+    const alertInfo = this._config.channels.ringer.alertInfo;
+
+    if (!alertInfo.enabled || !alertInfo.prewarm) {
+      return;
+    }
+
+    this._alertInfoRingtoneIds().forEach((id) => {
+      this._ensureRingtoneBuffer(id);
+    });
+  }
+
+  // The mapped key an inbound call's Alert-Info header value(s) match, or null.
+  _matchAlertInfoKey(alertInfo) {
+    const config = this._config.channels.ringer.alertInfo;
+    const values = (Array.isArray(alertInfo) ? alertInfo : [alertInfo])
+      .filter((value) => {
+        return typeof value == "string" && value.trim();
+      })
+      .map((value) => {
+        return value.trim().toLowerCase();
+      });
+
+    if (values.length == 0) {
+      return null;
+    }
+
+    if (typeof config.matcher == "function") {
+      // A host's matcher is arbitrary code, and getRingtoneForAlertInfo() is
+      // documented never to fail - a throw means "no key matched", which rings
+      // with the selected ringtone, rather than taking the ring down with it.
+      try {
+        return this._normalizeAlertInfoKey(
+          config.matcher(values, this.getAlertInfoMappings())
+        );
+      } catch (error) {
+        this._emit("channel.ringer.alertinfo.error", this, error);
+
+        return null;
+      }
+    }
+
+    // Mapping order decides, not header order: a call carrying two Alert-Info
+    // headers rings with the first mapping that matches either of them.
+    const matched = this._alertInfoKeys().find((key) => {
+      return values.some((value) => {
+        return this._alertInfoValueMatches(value, key);
+      });
+    });
+
+    return matched || null;
+  }
+
+  // `value` arrives trimmed and lowercased from _matchAlertInfoKey().
+  _alertInfoValueMatches(value, key) {
+    if (this._config.channels.ringer.alertInfo.matchMode == "exact") {
+      // Stripped the same way the key was, so a bare `alert-internal` mapping
+      // still matches the `<alert-internal>` an INVITE actually carries -
+      // otherwise exact mode would match nothing in the real world.
+      return this._normalizeAlertInfoKey(value) === key;
+    }
+
+    // Token: the key as a whole word anywhere in the value, which covers both
+    // `<alert-internal>` and a URI form like `<sip:x@pbx>;info=door-phone`.
+    // Hyphens and underscores count as part of a word rather than as
+    // boundaries, so `alert-internal` doesn't match `alert-internal-2`.
+    const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+    return new RegExp("(^|[^a-z0-9_-])" + escaped + "([^a-z0-9_-]|$)").test(
+      value
+    );
   }
 
   _createLocalMediaStreamSource(mediaStream) {
