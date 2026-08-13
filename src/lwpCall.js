@@ -42,11 +42,16 @@ export default class {
     if (session) {
       this._timeUpdate();
     }
-    
-    if (this._shouldAutoAnswer()) {
-      this.answer();
+
+    if (this._autoAnswer) {
+      // Emitted before answering so a host app can tell an auto-answered
+      // call apart from a user-answered one - "answered" alone looks
+      // identical to a button click - and log or render it accordingly.
+      this._emit("autoanswer", this);
+      this._takeFocusForAutoAnswer();
+      this._warnThenAutoAnswer();
     }
-	
+
     function filterCodecsInSDP(sdp, kind, allowed) {
       // allowed: array of codec names or full keys, e.g. ['opus/48000/2']
       // kind: 'audio' or 'video'
@@ -98,13 +103,127 @@ export default class {
   }
 
   _shouldAutoAnswer() {
-    if (this._session == null) return false;
-    if (this._session._request == null) return false;
-    if (!this._session._request.headers["Call-Info"]) return false;
-    
-    return this._session._request.headers["Call-Info"]
-      && this._session._request.headers["Call-Info"][0].raw.includes("answer-after=0");
-  }  
+    const autoAnswer = this._config.autoAnswer || {};
+
+    if (!autoAnswer.enabled) {
+      return false;
+    }
+
+    if (this.getDirection() != "terminating") {
+      return false;
+    }
+
+    if (autoAnswer.onlyWhenIdle && this._hasOtherEstablishedCall()) {
+      return false;
+    }
+
+    const answerAfterZero = /(^|[;,<\s])answer-after\s*=\s*"?0"?\s*($|[;,>])/i;
+    const alertAutoAnswer = /(^|[;,<\s])info\s*=\s*"?alert-autoanswer"?\s*($|[;,>])/i;
+
+    const matches = (values, patterns) =>
+      values.some((value) => patterns.some((pattern) => pattern.test(value)));
+
+    return (
+      matches(this.getCallInfo(), [answerAfterZero]) ||
+      matches(this.getAlertInfo(), [answerAfterZero, alertAutoAnswer])
+    );
+  }
+
+  _hasOtherEstablishedCall() {
+    const callList = this._libwebphone.getCallList();
+
+    if (!callList) {
+      return false;
+    }
+
+    return callList
+      .getCalls()
+      .some((call) => call !== this && call.isEstablished());
+  }
+
+  _warnThenAutoAnswer() {
+    const answerIfStillAnswerable = () => {
+      if (!this.isInProgress() || this.isEnded()) {
+        this._emit("autoanswer.abandoned", this);
+
+        return;
+      }
+
+      this.answer();
+    };
+
+    const audioContext = this._libwebphone.getAudioContext();
+    let warning = null;
+
+    if (audioContext) {
+      try {
+        warning = audioContext.playAutoAnswerWarning();
+      } catch (error) {
+        this._emit("error", this, error);
+      }
+    }
+
+    if (!warning) {
+      answerIfStillAnswerable();
+
+      return;
+    }
+
+    Promise.resolve(warning)
+      .catch((error) => {
+        this._emit("error", this, error);
+      })
+      .then(answerIfStillAnswerable);
+  }
+
+  /**
+   * Mirrors what a desk phone does when an intercom/paging call answers
+   * itself: whatever you were talking to goes on hold first, and the
+   * auto-answered call takes over as the active call.
+   *
+   * Both halves are needed. Without the hold, the previous call is left
+   * live - the user's mic feeds both far ends and the page plays mixed
+   * over the conversation. Without the promotion the auto-answered call
+   * would answer with its own media elements still disconnected (only
+   * _setPrimary() connects them), i.e. audible to the caller but not to
+   * the user - lwpCallList.addCall() deliberately does not promote a new
+   * call over an active one, since an ordinary call merely ringing in the
+   * background must not steal focus.
+   */
+  _takeFocusForAutoAnswer() {
+    const callList = this._libwebphone.getCallList();
+
+    if (!callList) {
+      return;
+    }
+
+    const conference = this._libwebphone.getConference();
+
+    if (conference && conference.isActive()) {
+      // Held as a unit rather than leg by leg, the same way switching
+      // focus away from a conference does - the other parties would
+      // otherwise be left live and audible to each other. No-ops if focus
+      // had already moved away from it, which holds it too.
+      conference.hold();
+    }
+
+    callList.getCalls().forEach((call) => {
+      // Conference legs are covered by conference.hold() above; holding
+      // them individually here would only fight it.
+      if (call === this || call.isInConference()) {
+        return;
+      }
+
+      if (call.isEstablished() && !call.isOnHold()) {
+        call.hold();
+      }
+    });
+
+    // Everything answerable is already held by now, so the demotion this
+    // triggers re-holds nothing; it runs for the stream disconnect and the
+    // promoted/demoted events every other module renders from.
+    callList.switchCall(this.getId());
+  }
 
   getId() {
     return this._id;
@@ -183,8 +302,21 @@ export default class {
     return false;
   }
 
+  /**
+   * Whether this call is alerting the user - not merely "inbound and not
+   * yet established". An auto-answered call is about to answer itself, so
+   * it never alerts: no ringtone (this gates the "ringing.started" emit in
+   * _initProperties(), and lwpAudioContext's own ringer-queue
+   * reconciliation), and no ringing overlay on the video canvas, which
+   * gates on this too. Suppressing the event alone would have left the
+   * bell flashing until the call connected.
+   */
   isRinging() {
-    return this.getDirection() == "terminating" && !this.isEstablished();
+    return (
+      this.getDirection() == "terminating" &&
+      !this.isEstablished() &&
+      !this._autoAnswer
+    );
   }
 
   isInTransfer() {
@@ -244,6 +376,22 @@ export default class {
     return request.getHeaders("Alert-Info");
   }
 
+  /**
+   * The raw Call-Info header value(s) from the INVITE, in the order they
+   * appeared. Same shape and same caveats as getAlertInfo() - empty for an
+   * outbound call, or an inbound one without the header.
+   */
+  getCallInfo() {
+    const session = this._getSession();
+    const request = session ? session._request : null;
+
+    if (!request || typeof request.getHeaders != "function") {
+      return [];
+    }
+
+    return request.getHeaders("Call-Info");
+  }
+
   localIdentity(details = false) {
     const session = this._getSession();
     if (session) {
@@ -289,7 +437,7 @@ export default class {
     return this._remoteIdentityOverride.uri_user;
   }
 
-  remoteURIUser() { 
+  remoteURIUser() {
     const session = this._getSession();
     if (session) {
       return session._dialog._remote_uri.user;
@@ -634,6 +782,19 @@ export default class {
 
       if (mediaDevices) {
         mediaDevices.startStreams(this.getId()).then((streams) => {
+          // Re-checked rather than trusted from when answer() was called.
+          // startStreams() bottoms out in getUserMedia(), which on the first
+          // call of a page is a permission prompt of unbounded duration, and
+          // the caller can give up while it sits open - JsSIP's answer()
+          // throws InvalidStateError on a session that is no longer waiting
+          // for one, and that throw lands inside this .then where only the
+          // catch below would ever see it.
+          if (!this.isInProgress() || this.isEnded()) {
+            this._emit("answer.abandoned", this);
+
+            return;
+          }
+
           const hasTracks = streams && streams.getTracks().length > 0;
 
           if (!hasTracks) {
@@ -661,6 +822,33 @@ export default class {
 
           this._getSession().answer({ mediaStream: streams });
           this._emit("answered", this);
+        }).catch((error) => {
+          // Nothing was watching this promise before. A user clicking
+          // "answer" at least sees their click do nothing; an auto-answered
+          // call fails completely silently - no ringtone (it is suppressed
+          // deliberately), no answer, no error - and the caller just hears
+          // ringback until the INVITE times out. The window is widest
+          // exactly where auto-answer lives: startStreams() bottoms out in
+          // getUserMedia(), so on the first call of a page this is a
+          // permission prompt of unbounded duration, and session.answer()
+          // itself throws InvalidStateError if the caller gave up while it
+          // was open.
+          console.warn("[lwpCall] answer() failed for call " + this.getId(), error);
+          this._emit("error", this, error);
+
+          // Rejected rather than left hanging. Without this the session sits
+          // un-answered until the INVITE times out, and the caller hears
+          // ringback the whole time with no idea anything went wrong - the
+          // mic prompt was denied, dismissed, or never seen. A clean
+          // rejection at least tells them, immediately.
+          //
+          // Guarded because the commonest way to get here is the caller
+          // having already given up: terminating a session that has ended
+          // is not what "reject" means, and would emit a "rejected" for a
+          // call nobody rejected.
+          if (this.isInProgress() && !this.isEnded()) {
+            this.reject();
+          }
         });
       } else {
         this._getSession().answer({});
@@ -867,6 +1055,15 @@ export default class {
 
     this._config = this._libwebphone._config.call;
 
+    // Decided once, here, and read everywhere else - never re-derived.
+    // Auto-answer needs two coordinated behaviours (answer the call, and
+    // don't alert for it) at sites far apart in this file, and when each
+    // evaluated _shouldAutoAnswer() independently they drifted: #31022
+    // removed both, and its follow-up restored only the answering half,
+    // leaving auto-answered calls ringing right up until they connected.
+    // Must stay above the isRinging() check at the end of this method.
+    this._autoAnswer = this._shouldAutoAnswer();
+
     this._streams = {
       remote: {
         mediaStream: new MediaStream(),
@@ -1012,8 +1209,17 @@ export default class {
       });
       this._getSession().on("connecting", () => {
         // Mute video and audio after the local media stream is added into RTCSession
+        //
+        // Muted here rather than after answering, for the same reason
+        // startWithAudioMuted is: this runs as the local stream is attached
+        // to the session, so the microphone is closed before any RTP has
+        // left. Muting once the call was established would leak however
+        // long that took.
+        const autoAnswerMuted =
+          this._autoAnswer && (this._config.autoAnswer || {}).muteMicrophone;
+
         this._getSession().mute({
-          audio: this._config.startWithAudioMuted,
+          audio: this._config.startWithAudioMuted || !!autoAnswerMuted,
           video: this._config.startWithVideoMuted,
         });
       });

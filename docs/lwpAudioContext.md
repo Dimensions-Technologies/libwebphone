@@ -478,6 +478,44 @@ Takes effect immediately, including on a call already waiting: switching it on m
 
 Inverts [isCallWaitingEnabled()](#iscallwaitingenabled) via [setCallWaitingEnabled()](#setcallwaitingenabledenabled).
 
+#### isAutoAnswerWarningEnabled()
+
+Return:
+
+| Type    | Description                                                        |
+| ------- | ------------------------------------------------------------------ |
+| boolean | The current value of `channels.ringer.autoAnswerWarning.enabled`   |
+
+#### setAutoAnswerWarningEnabled(enabled)
+
+Turns the auto-answer warning tone on or off.
+
+| Name    | Type    | Default | Description                                     |
+| ------- | ------- | ------- | ----------------------------------------------- |
+| enabled | boolean |         | Whether the warning tone sounds before answering |
+
+Takes effect from the next auto-answered call. With it off such a call connects immediately and silently - there is no tone, and no wait for one, so the answer goes out roughly 325ms sooner. Emits `audioContext.channel.ringer.autoanswerwarning.enabled` and re-renders. Setting it to what it already is does nothing.
+
+This controls the tone only. Whether a call auto-answers at all is `config.call.autoAnswer.enabled` - see `libwebphone.setAutoAnswerEnabled()`.
+
+#### toggleAutoAnswerWarning()
+
+Inverts [isAutoAnswerWarningEnabled()](#isautoanswerwarningenabled) via [setAutoAnswerWarningEnabled()](#setautoanswerwarningenabledenabled).
+
+#### playAutoAnswerWarning()
+
+Plays the auto-answer warning tone - the short "beep beep" a desk phone sounds before answering an intercom or paging call by itself, so the user knows their microphone is about to open rather than discovering it afterwards. Called by lwpCall on the auto-answer path; a host application should not normally need it.
+
+Return:
+
+| Type              | Description                                                              |
+| ----------------- | ------------------------------------------------------------------------ |
+| Promise\<boolean\> | Resolves once the tone has finished, to whether it actually played       |
+
+Resolves rather than rejects on every failure path - when the tone is disabled, when the AudioContext cannot be resumed because there has been no user gesture yet, or on an outright throw. A warning tone that could not be played must never be the reason a call goes unanswered, so the caller answers regardless; the failure is reported on `audioContext.autoanswer.warning.error` instead.
+
+Every beep is scheduled up front on the audio clock rather than driven by a timer per beep - `setTimeout` jitter between them would be plainly audible at this spacing.
+
 #### getCallWaitingInterval()
 
 Return:
@@ -895,6 +933,16 @@ Re-paint / update all render targets.
 | channels.ringer.callWaiting.interval | integer | 30      | Seconds between call waiting beeps. Clamped into `[intervalMin, intervalMax]` on construction and on every [setCallWaitingInterval()](#setcallwaitingintervalseconds) |
 | channels.ringer.callWaiting.intervalMin | integer | 10   | The shortest interval that can be set. Raise or lower it to widen the range a host application's UI offers                                            |
 | channels.ringer.callWaiting.intervalMax | integer | 60   | The longest interval that can be set                                                                                                                 |
+| channels.ringer.autoAnswerWarning.show | boolean | true  | Should the default template show the [auto-answer section](#sections) - the warning tone checkbox                                                     |
+| channels.ringer.autoAnswerWarning.enabled | boolean | true | Whether an auto-answered call sounds the warning tone before answering. With this false it answers immediately and silently. Change at runtime with [setAutoAnswerWarningEnabled()](#setautoanswerwarningenabledenabled) |
+| channels.ringer.autoAnswerWarning.count | integer | 2      | How many beeps.                                                                                    |
+| channels.ringer.autoAnswerWarning.gap | float    | 0.08   | Seconds of silence between beeps                                                                                                                     |
+| channels.ringer.autoAnswerWarning.duration | float | 0.12  | Seconds each beep sounds for, inclusive of its fades                                                                                                 |
+| channels.ringer.autoAnswerWarning.frequency | integer | 520 | Beep frequency in Hz. Higher than the call waiting beep so the two are not mistaken for each other                                                    |
+| channels.ringer.autoAnswerWarning.volume | float  | 0.4    | The level of the beep on the speaker (`audiooutput`) device, on its own gain node so it is independent of the call waiting level. Louder than that one, which has to sit under a conversation already in progress - this one is a warning that the microphone is about to open |
+| channels.ringer.autoAnswerWarning.type | string  | "sine" | Oscillator type                                                                                                                                      |
+| channels.ringer.autoAnswerWarning.fadeIn | float  | 0.005  | Declick ramp up, in seconds                                                                                                                          |
+| channels.ringer.autoAnswerWarning.fadeOut | float | 0.01   | Declick ramp down, in seconds                                                                                                                        |
 | channels.ringer.callWaiting.volume  | float    | 0.4    | The level of the beep on the speaker (`audiooutput`) device. Master volume still applies on top; the ringer volume does not, since the beep does not go to the ring output. Well below full scale because it plays into a headset someone is already holding a conversation on - for reference the DTMF feedback tones on the same device sit at 0.15, and those are not competing with anything |
 | channels.ringer.callWaiting.frequency | integer | 440    | The frequency of the beep                                                                                                                            |
 | channels.ringer.callWaiting.duration | float   | 0.25    | The duration, in seconds, of one beep. Raised to `fadeIn + fadeOut` if set shorter than the two fades together                                        |
@@ -950,6 +998,10 @@ Re-paint / update all render targets.
 | audioContext.callwaiting.tone.error   | error, deviceId (string)         | Emitted when a beep cannot play because the AudioContext was not running - the same condition as `audioContext.ringtone.play.error`. The third argument is the speaker (`audiooutput`) device the beep would have played on, rather than [getOutputSinkInfo()](#getoutputsinkinfo): the ring output sink says nothing about where this tone goes. The beep is skipped and the next one in the cycle tries again |
 | audioContext.channel.ringer.callwaiting.enabled | enabled (boolean)      | Emitted when setCallWaitingEnabled() turns the call waiting tone on or off. Not emitted where nothing actually changed |
 | audioContext.channel.ringer.callwaiting.interval | interval (integer)    | Emitted when setCallWaitingInterval() changes the interval, carrying the value actually applied (clamped). Not emitted where nothing actually changed |
+| audioContext.channel.ringer.autoanswerwarning.enabled | enabled (boolean) | Emitted when setAutoAnswerWarningEnabled() turns the auto-answer warning tone on or off. Not emitted where nothing actually changed |
+| audioContext.autoanswer.warning.started | duration (float)             | Emitted as the warning tone begins, carrying how long it will run in seconds - the auto-answered call is answered when it finishes |
+| audioContext.autoanswer.warning.stopped |                              | Emitted once the warning tone has finished                                                                                        |
+| audioContext.autoanswer.warning.error | error (Error), sinkId (string) | Emitted when the warning tone could not be played. The call is answered anyway, without one                                       |
 | audioContext.channel.ringer.alertinfo.changed | key (string), id (string or null) | Emitted when setAlertInfoRingtone() adds a mapping or changes one, including when it is cleared back to the selected ringtone (a null id). Not emitted where nothing actually changed |
 | audioContext.channel.ringer.alertinfo.removed | key (string)                | Emitted when removeAlertInfoMapping() deletes a custom mapping         |
 | audioContext.channel.ringer.alertinfo.error | error                        | Emitted when resolving an inbound call's Alert-Info threw - in practice a `channels.ringer.alertInfo.matcher` that failed. The call still rings, with `channels.ringer.selected`; this is how an otherwise invisible fault in a host's own matching surfaces |
@@ -1015,6 +1067,7 @@ names it, instead of switching the other two off with `show` flags:
 | `volumes`     | The master, ringer, tones, preview and call volume controls, each still subject to its channel's `show` |
 | `ringtones`   | The ringtone selector, its preview button and the Alert-Info controls - `channels.ringer.ringtones.show` |
 | `callwaiting` | The call waiting tone checkbox and, while it is on, the interval input - `channels.ringer.callWaiting.show` |
+| `autoanswerwarning` | The auto-answer warning tone checkbox - `channels.ringer.autoAnswerWarning.show`. Only the tone: whether calls auto-answer at all, and whether they open the microphone, are `config.call` settings and belong to [libwebphone](./../README.md) rather than this module |
 
 A section target needs nothing else: the events, i18n keys and data all come
 from the default render config, exactly as for a target that takes the whole
