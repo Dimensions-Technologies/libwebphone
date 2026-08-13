@@ -31,6 +31,13 @@
             "call_control"
         ]
     },
+    "call": {
+        "autoAnswer": {
+            "enabled": true,
+            "muteMicrophone": false,
+            "onlyWhenIdle": false
+        }
+    },
     "conference": {
         "enabled": true,
         "maxParticipants": 5
@@ -81,6 +88,9 @@
                 "callWaiting": {
                     "enabled": true,
                     "interval": 30
+                },
+                "autoAnswerWarning": {
+                    "enabled": true
                 }
             }
         },
@@ -121,6 +131,12 @@
                     "elementId": "audio_context_callwaiting"
                 },
                 "section": "callwaiting"
+            },
+            {
+                "root": {
+                    "elementId": "audio_context_autoanswer"
+                },
+                "section": "autoanswerwarning"
             }
         ]
     },

@@ -452,6 +452,139 @@ export default class extends lwpRenderer {
     this.setCallWaitingEnabled(!this.isCallWaitingEnabled());
   }
 
+  isAutoAnswerWarningEnabled() {
+    return !!this._config.channels.ringer.autoAnswerWarning.enabled;
+  }
+
+  // Takes effect from the next auto-answered call, so a host app can offer
+  // this as a setting and have it apply without a reload. With it off, an
+  // auto-answered call connects immediately and silently - no warning, and
+  // no wait for one.
+  setAutoAnswerWarningEnabled(enabled) {
+    enabled = !!enabled;
+
+    if (enabled == this.isAutoAnswerWarningEnabled()) {
+      return;
+    }
+
+    this._config.channels.ringer.autoAnswerWarning.enabled = enabled;
+
+    this._emit("channel.ringer.autoanswerwarning.enabled", this, enabled);
+    this.updateRenders();
+  }
+
+  toggleAutoAnswerWarning() {
+    this.setAutoAnswerWarningEnabled(!this.isAutoAnswerWarningEnabled());
+  }
+
+  /**
+   * Plays the auto-answer warning tone - the "beep beep" a desk phone
+   * sounds before answering an intercom call by itself - and resolves once
+   * it has finished, so the caller can answer *after* the warning rather
+   * than under it.
+   *
+   * Resolves rather than rejects on every failure path, and resolves
+   * immediately when the tone is disabled or the AudioContext can't be
+   * resumed (no user gesture yet). A warning tone that couldn't be played
+   * must never be the reason a call goes unanswered - the worst outcome
+   * here is the pre-existing behaviour of answering without one.
+   */
+  playAutoAnswerWarning() {
+    const config = this._config.channels.ringer.autoAnswerWarning;
+
+    if (!config.enabled || config.count < 1) {
+      return Promise.resolve(false);
+    }
+
+    this.startAudioContext();
+
+    return this._resumeAudioContext()
+      .then((running) => {
+        if (!running) {
+          this._emit(
+            "autoanswer.warning.error",
+            this,
+            new Error("AudioContext is not running"),
+            this._getMediaElementSinkId("audiooutput")
+          );
+
+          return false;
+        }
+
+        const context = this._audioContext;
+        // Read after the resume settled, not before it - the clock has
+        // moved on while it was suspended.
+        const start = context.currentTime;
+        const fadeIn = config.fadeIn;
+        const fadeOut = config.fadeOut;
+        // The fades are part of each beep, not additions to it, so a
+        // duration shorter than both together would ramp down before it
+        // was up.
+        const duration = Math.max(config.duration, fadeIn + fadeOut);
+        const step = duration + config.gap;
+
+        for (let index = 0; index < config.count; index++) {
+          // Every beep is scheduled up front on the audio clock rather
+          // than driven by a timer per beep: setTimeout jitter between
+          // them would be plainly audible at this spacing, and the whole
+          // sequence is only a few hundred milliseconds long.
+          this._scheduleAutoAnswerWarningBeep(
+            context,
+            config,
+            start + index * step,
+            duration
+          );
+        }
+
+        // The tail of the last beep, plus the same small margin its own
+        // stop() uses so the resolve lands on real silence rather than
+        // clipping the final ramp.
+        const total = (config.count - 1) * step + duration + 0.005;
+
+        this._emit("autoanswer.warning.started", this, total);
+
+        return new Promise((resolve) => {
+          setTimeout(() => {
+            this._emit("autoanswer.warning.stopped", this);
+            resolve(true);
+          }, total * 1000);
+        });
+      })
+      .catch((error) => {
+        this._emit("autoanswer.warning.error", this, error, null);
+
+        return false;
+      });
+  }
+
+  _scheduleAutoAnswerWarningBeep(context, config, when, duration) {
+    const oscillator = this._shimCreateOscillator(context);
+    const envelope = this._shimCreateGain(context);
+
+    oscillator.type = config.type;
+    oscillator.frequency.value = config.frequency;
+
+    // Shape only - the level is `autoAnswerWarningGain`, the way every other
+    // channel keeps its volume on a node of its own rather than baked into
+    // the envelope.
+    envelope.gain.setValueAtTime(0, when);
+    envelope.gain.linearRampToValueAtTime(1, when + config.fadeIn);
+    envelope.gain.setValueAtTime(1, when + duration - config.fadeOut);
+    envelope.gain.linearRampToValueAtTime(0, when + duration);
+
+    oscillator.connect(envelope);
+    envelope.connect(this._outputAudio.autoAnswerWarningGain);
+
+    oscillator.onended = () => {
+      oscillator.disconnect();
+      envelope.disconnect();
+    };
+
+    oscillator.start(when);
+    // A small margin past the ramp so the stop lands on real silence.
+    oscillator.stop(when + duration + 0.005);
+  }
+
   getCallWaitingInterval() {
     return this._config.channels.ringer.callWaiting.interval;
   }
@@ -959,6 +1092,8 @@ export default class extends lwpRenderer {
         callwaitingsection: "Call Waiting",
         callwaiting: "Call Waiting Tone",
         callwaitinginterval: "Call Waiting Tone Interval (seconds)",
+        autoanswerwarningsection: "Auto Answer",
+        autoanswerwarning: "Auto Answer Warning Tone",
         alertinfointernal: "Internal Call Ringtone",
         alertinfoexternal: "External Call Ringtone",
         alertinfocustom: "Custom Alert-Info Ringtones",
@@ -1078,6 +1213,33 @@ export default class extends lwpRenderer {
             // clicks at both ends.
             fadeIn: 0.01,
             fadeOut: 0.02,
+          },
+          // The auto-answer warning tone: the short "beep beep" a desk
+          // phone plays *before* answering an intercom/paging call by
+          // itself, so the user knows their microphone is about to open
+          // rather than discovering it afterwards. Played out of the
+          // speaker (`audiooutput`) for the same reason as the call
+          // waiting beep - it is for the person about to be connected, not
+          // an alert to the room - see playAutoAnswerWarning().
+          autoAnswerWarning: {
+            // With this off the call auto-answers silently and
+            // immediately: no tone, and no delay waiting for one.
+            enabled: true,
+            show: true,
+            // How many beeps, and the silence between them.
+            count: 2,
+            gap: 0.08,
+            // Louder than the call waiting beep: that one has to sit under
+            // a conversation already in progress, this one is a warning
+            // that the mic is about to open and should be hard to miss.
+            volume: 0.4,
+            frequency: 520,
+            duration: 0.12,
+            type: "sine",
+            // Declicks, as everywhere else here - a beep starting or
+            // stopping mid-waveform clicks at both ends.
+            fadeIn: 0.005,
+            fadeOut: 0.01,
           },
           // How long previewRingtone() plays before auto-stopping itself
           previewDuration: 8,
@@ -1265,6 +1427,19 @@ export default class extends lwpRenderer {
     this._outputAudio.callWaitingGain.gain.value =
       this._config.channels.ringer.callWaiting.volume;
     this._outputAudio.callWaitingGain.connect(
+      this._outputAudio.tonesDestinationStream
+    );
+
+    // The auto-answer warning tone, on the same stream and for the same
+    // reasons as the call waiting beep above, but on a node of its own so
+    // the two levels stay independent - this one has to be heard over
+    // nothing in particular, that one has to sit under a live call.
+    this._outputAudio.autoAnswerWarningGain = this._shimCreateGain(
+      this._outputAudio.context
+    );
+    this._outputAudio.autoAnswerWarningGain.gain.value =
+      this._config.channels.ringer.autoAnswerWarning.volume;
+    this._outputAudio.autoAnswerWarningGain.connect(
       this._outputAudio.tonesDestinationStream
     );
 
@@ -1674,6 +1849,8 @@ export default class extends lwpRenderer {
         callwaitingsection: "libwebphone:audioContext.callwaitingsection",
         callwaiting: "libwebphone:audioContext.callwaiting",
         callwaitinginterval: "libwebphone:audioContext.callwaitinginterval",
+        autoanswerwarningsection: "libwebphone:audioContext.autoanswerwarningsection",
+        autoanswerwarning: "libwebphone:audioContext.autoanswerwarning",
         alertinfointernal: "libwebphone:audioContext.alertinfointernal",
         alertinfoexternal: "libwebphone:audioContext.alertinfoexternal",
         alertinfocustom: "libwebphone:audioContext.alertinfocustom",
@@ -1729,6 +1906,13 @@ export default class extends lwpRenderer {
           events: {
             onchange: (event) => {
               this.setCallWaitingEnabled(event.srcElement.checked);
+            },
+          },
+        },
+        autoanswerwarning: {
+          events: {
+            onchange: (event) => {
+              this.setAutoAnswerWarningEnabled(event.srcElement.checked);
             },
           },
         },
@@ -1921,6 +2105,8 @@ export default class extends lwpRenderer {
           ${this._renderRingtonesSection()}
 
           ${this._renderCallWaitingSection()}
+
+          ${this._renderAutoAnswerWarningSection()}
         </div>
         `;
   }
@@ -1943,6 +2129,11 @@ export default class extends lwpRenderer {
       callwaiting: `
         <div>
           ${this._renderCallWaitingSection()}
+        </div>
+        `,
+      autoanswerwarning: `
+        <div>
+          ${this._renderAutoAnswerWarningSection()}
         </div>
         `,
     };
@@ -2132,6 +2323,28 @@ export default class extends lwpRenderer {
     `;
   }
 
+  // Just the tone. The other two auto-answer settings (whether it happens
+  // at all, and whether it opens the microphone) live on config.call, which
+  // this module does not own - see libwebphone.setAutoAnswerEnabled().
+  _renderAutoAnswerWarningSection() {
+    return `
+          {{#data.channels.ringer.autoAnswerWarning.show}}
+            <fieldset>
+              <legend>{{i18n.autoanswerwarningsection}}</legend>
+
+              <div>
+                {{! Checkbox before its label, matching the call waiting
+                    row below. }}
+                <input type="checkbox" id="{{by_id.autoanswerwarning.elementId}}" {{#data.autoAnswerWarning.enabled}}checked{{/data.autoAnswerWarning.enabled}}>
+                <label for="{{by_id.autoanswerwarning.elementId}}">
+                  {{i18n.autoanswerwarning}}
+                </label>
+              </div>
+            </fieldset>
+          {{/data.channels.ringer.autoAnswerWarning.show}}
+    `;
+  }
+
   _renderCallWaitingSection() {
     return `
           {{#data.channels.ringer.callWaiting.show}}
@@ -2193,6 +2406,13 @@ export default class extends lwpRenderer {
       intervalMin: callWaiting.intervalMin,
       intervalMax: callWaiting.intervalMax,
       waiting: this.isCallWaiting(),
+    };
+
+    // Read live for the same reason as callWaiting above - the cloned
+    // config the render was built from is a snapshot, so a toggle would not
+    // show up in it.
+    data.autoAnswerWarning = {
+      enabled: this.isAutoAnswerWarningEnabled(),
     };
 
     return data;

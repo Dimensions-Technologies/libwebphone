@@ -96,6 +96,81 @@ export default class extends EventEmitter {
         return this._audioContext;
     }
 
+    isAutoAnswerEnabled() {
+        return !!this._autoAnswerConfig().enabled;
+    }
+
+    setAutoAnswerEnabled(enabled) {
+        enabled = !!enabled;
+
+        if (enabled == this.isAutoAnswerEnabled()) {
+            return;
+        }
+
+        this._autoAnswerConfig().enabled = enabled;
+
+        this._emit("autoAnswer.enabled", this, enabled);
+    }
+
+    toggleAutoAnswer() {
+        this.setAutoAnswerEnabled(!this.isAutoAnswerEnabled());
+    }
+
+    isAutoAnswerMuteMicrophone() {
+        return !!this._autoAnswerConfig().muteMicrophone;
+    }
+
+    setAutoAnswerMuteMicrophone(muted) {
+        muted = !!muted;
+
+        if (muted == this.isAutoAnswerMuteMicrophone()) {
+            return;
+        }
+
+        this._autoAnswerConfig().muteMicrophone = muted;
+
+        this._emit("autoAnswer.muteMicrophone", this, muted);
+    }
+
+    toggleAutoAnswerMuteMicrophone() {
+        this.setAutoAnswerMuteMicrophone(!this.isAutoAnswerMuteMicrophone());
+    }
+
+    isAutoAnswerOnlyWhenIdle() {
+        return !!this._autoAnswerConfig().onlyWhenIdle;
+    }
+
+    setAutoAnswerOnlyWhenIdle(onlyWhenIdle) {
+        onlyWhenIdle = !!onlyWhenIdle;
+
+        if (onlyWhenIdle == this.isAutoAnswerOnlyWhenIdle()) {
+            return;
+        }
+
+        this._autoAnswerConfig().onlyWhenIdle = onlyWhenIdle;
+
+        this._emit("autoAnswer.onlyWhenIdle", this, onlyWhenIdle);
+    }
+
+    toggleAutoAnswerOnlyWhenIdle() {
+        this.setAutoAnswerOnlyWhenIdle(!this.isAutoAnswerOnlyWhenIdle());
+    }
+
+    _autoAnswerConfig() {
+        const autoAnswer = this._config.call.autoAnswer;
+
+        if (!autoAnswer || typeof autoAnswer != "object") {
+            this._config.call.autoAnswer = {
+                enabled: false,
+                muteMicrophone: false,
+            };
+
+            return this._config.call.autoAnswer;
+        }
+
+        return autoAnswer;
+    }
+
     getUtils() {
         return lwpUtils;
     }
@@ -146,6 +221,21 @@ export default class extends EventEmitter {
                 globalKeyShortcuts: true,
                 startWithAudioMuted: false,
                 startWithVideoMuted: false,
+                autoAnswer: {
+                    enabled: true,
+                    muteMicrophone: false,
+                    // Whether an auto-answer header is ignored while another
+                    // call is already established, the way most desk phones
+                    // treat answer-after=0 when you are mid-conversation.
+                    // The call is then presented completely normally - it
+                    // rings, or gets the call waiting tone, and the user
+                    // decides.
+                    //
+                    // Defaults to off to preserve existing behaviour, where
+                    // the page is answered on top and the call you were on
+                    // is put on hold.
+                    onlyWhenIdle: false,
+                },
                 keys: {
                     spacebar: {
                         enabled: true,

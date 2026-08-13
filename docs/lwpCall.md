@@ -570,6 +570,67 @@ getter/method above for each field's meaning.
 | globalKeyShortcuts    | boolean  | true    | Should the event listeners in the 'keys' property be added to the document                                                                        |
 | keys.spacebar.enabled | boolean  | true    | If true, and globalKeyShortcuts is also true, preform keys.spacebar.action if the spacebar is pressed when the body of the document has the focus |
 | keys.spacebar.action  | function |         | By default this callback will toggle mute (both video and audio) for the duration the spacebar is held.                                           |
+| autoAnswer.enabled    | boolean  | true    | Should an inbound INVITE carrying an auto-answer header answer itself. See note.                                                                  |
+| autoAnswer.muteMicrophone | boolean | false | Should an auto-answered call start with the microphone muted, independently of startWithAudioMuted.                                               |
+| autoAnswer.onlyWhenIdle | boolean | false   | Should an auto-answer header be ignored while another call is already established. See note.                                                      |
+
+> ### Auto-answer
+>
+> An inbound INVITE is auto-answered when it carries either of the two
+> conventional headers used for intercom, paging and click-to-dial:
+>
+> | Header       | Value that triggers it                     |
+> | ------------ | ------------------------------------------ |
+> | `Call-Info`  | `answer-after=0`                           |
+> | `Alert-Info` | `answer-after=0` or `info=alert-autoanswer` |
+>
+> Every value of both headers is checked, and the parameter is matched
+> case-insensitively whether it appears after a URI
+> (`<sip:pbx>;answer-after=0`) or inside the brackets in place of one
+> (`<info=alert-autoanswer>`) - both forms are sent in the field. A non-zero
+> `answer-after=N` is ignored rather than scheduled.
+>
+> An auto-answered call does not ring, holds any established call first and
+> takes over as the primary call, then plays the auto-answer warning tone
+> (see lwpAudioContext `channels.ringer.autoAnswerWarning`) before
+> answering. It emits `call.autoanswer` before doing any of that, so a host
+> app can tell an auto-answered call apart from one the user answered.
+>
+> Both settings can be changed at runtime, and apply from the next inbound
+> INVITE with no restart or re-registration:
+>
+> | Method                                       | Setting                          |
+> | -------------------------------------------- | -------------------------------- |
+> | `libwebphone.setAutoAnswerEnabled(bool)`     | `call.autoAnswer.enabled`        |
+> | `libwebphone.setAutoAnswerMuteMicrophone(bool)` | `call.autoAnswer.muteMicrophone` |
+> | `libwebphone.setAutoAnswerOnlyWhenIdle(bool)` | `call.autoAnswer.onlyWhenIdle`    |
+> | `lwpAudioContext.setAutoAnswerWarningEnabled(bool)` | `audioContext.channels.ringer.autoAnswerWarning.enabled` |
+>
+> Each has a matching `is…()` getter and a `toggle…()`, and emits on change
+> (`autoAnswer.enabled`, `autoAnswer.muteMicrophone`,
+> `autoAnswer.onlyWhenIdle`, and
+> `audioContext.channel.ringer.autoanswerwarning.enabled` respectively).
+> There is deliberately no way to change how a call already in flight
+> behaves - by the time one exists the decision has been made and acted on.
+> As with the ringtone settings, **the library does not persist any of
+> these**; a host application that lets users change them is responsible for
+> storing them and passing them back in on construction.
+>
+> With `autoAnswer.onlyWhenIdle` on, an auto-answer header arriving while
+> another call is already established is ignored entirely and that call is
+> presented completely normally - it rings, or gets the call waiting tone,
+> and the user answers it or doesn't. This is what most desk phones do with
+> `answer-after=0` mid-conversation. Off (the default), the page is answered
+> on top and the call you were on is put on hold.
+>
+> With `autoAnswer.enabled` on - which is the default, and the behaviour
+> libwebphone has always had - anything able to route an INVITE to this
+> registration can open the user's microphone without them touching
+> anything. The real protection is the platform refusing to route
+> unauthenticated INVITEs to the AOR; this library does not authenticate the
+> sender. `autoAnswer.muteMicrophone` is a middle ground: the call still
+> connects and the user still hears the page, but nothing leaves their
+> microphone until they unmute deliberately.
 
 > If useAudioContext is true the lwpCall class will not unmute the elements used
 > to play the remote audio, instead it is expected that the lwpAudioContext

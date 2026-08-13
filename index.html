@@ -510,6 +510,14 @@
             color: var(--text-dim);
         }
 
+        /* A checkbox row puts its label after the box it toggles, so it is
+           not part of the label column the width above exists to line up -
+           it just makes the text wrap early. Size these to their content
+           instead. */
+        .panel-column div:has(> input[type="checkbox"]) > label {
+            width: auto;
+        }
+
         /* Tabular lists inside a component (the Alert-Info ringtone mappings
            are the only one today). Kept tag-shaped like the rules above,
            since the library's templates carry no classes of their own. */
@@ -624,13 +632,15 @@
            put the section among others. The child selector keeps the
            Alert-Info fieldset nested inside intact. */
         #audio_context_ringtones > div > fieldset,
-        #audio_context_callwaiting > div > fieldset {
+        #audio_context_callwaiting > div > fieldset,
+        #audio_context_autoanswer > div > fieldset {
             border: none;
             padding: 0;
         }
 
         #audio_context_ringtones > div > fieldset > legend,
-        #audio_context_callwaiting > div > fieldset > legend {
+        #audio_context_callwaiting > div > fieldset > legend,
+        #audio_context_autoanswer > div > fieldset > legend {
             display: none;
         }
 
@@ -1229,6 +1239,28 @@
         });
         //webphone.onAny((event, ...data) => console.log(event, data));
 
+        // Auto answer. The warning-tone checkbox renders itself from
+        // lwpAudioContext; these two are config.call settings, which no
+        // renderer owns, so they are wired by hand to the libwebphone
+        // setters. Both apply from the next inbound call - no reconnect.
+        function renderAutoAnswerCustom() {
+            const enabled = document.getElementById("autoanswer_enabled");
+            const mute = document.getElementById("autoanswer_mute");
+            const idle = document.getElementById("autoanswer_idle");
+            if (!enabled || !mute || !idle) return;
+
+            enabled.checked = webphone.isAutoAnswerEnabled();
+            mute.checked = webphone.isAutoAnswerMuteMicrophone();
+            idle.checked = webphone.isAutoAnswerOnlyWhenIdle();
+            // Both only mean anything if calls are being auto-answered at all.
+            mute.disabled = !enabled.checked;
+            idle.disabled = !enabled.checked;
+        }
+
+        webphone.on("autoAnswer.enabled", renderAutoAnswerCustom);
+        webphone.on("autoAnswer.muteMicrophone", renderAutoAnswerCustom);
+        webphone.on("autoAnswer.onlyWhenIdle", renderAutoAnswerCustom);
+
         webphone.on("blf.key.status.updated", (lwp, blf, key) => {
             console.log("BLF status update:", key.name, "->", key.status);
             renderBLFCustom();
@@ -1572,6 +1604,53 @@
                 </div>
             </div>
         </div>
+
+        <!-- Auto Answer. The warning tone is an audioContext setting and
+             renders itself like the sections above; the other two live on
+             config.call, which no renderer owns, so they are driven
+             directly through the libwebphone setters - see
+             renderAutoAnswerCustom(). -->
+        <div class="panel">
+            <div class="panel-header">Auto Answer</div>
+            <div class="panel-columns panel-columns--single">
+                <div class="panel-column">
+                    <div>
+                        <input type="checkbox" id="autoanswer_enabled">
+                        <label for="autoanswer_enabled">Answer calls marked auto-answer</label>
+                    </div>
+                    <div>
+                        <input type="checkbox" id="autoanswer_mute">
+                        <label for="autoanswer_mute">Start auto-answered calls muted</label>
+                    </div>
+                    <div>
+                        <input type="checkbox" id="autoanswer_idle">
+                        <label for="autoanswer_idle">Only auto-answer when no other call is established</label>
+                    </div>
+                    <div id="audio_context_autoanswer"></div>
+                </div>
+            </div>
+        </div>
+        <script type="text/javascript">
+            document
+                .getElementById("autoanswer_enabled")
+                .addEventListener("change", (event) => {
+                    webphone.setAutoAnswerEnabled(event.srcElement.checked);
+                });
+
+            document
+                .getElementById("autoanswer_mute")
+                .addEventListener("change", (event) => {
+                    webphone.setAutoAnswerMuteMicrophone(event.srcElement.checked);
+                });
+
+            document
+                .getElementById("autoanswer_idle")
+                .addEventListener("change", (event) => {
+                    webphone.setAutoAnswerOnlyWhenIdle(event.srcElement.checked);
+                });
+
+            renderAutoAnswerCustom();
+        </script>
 
         <!-- Dialpad -->
         <div class="panel">
