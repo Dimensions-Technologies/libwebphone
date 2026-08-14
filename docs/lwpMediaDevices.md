@@ -207,6 +207,16 @@ Re-paint / update all render targets.
 | manageMediaElements                     | boolean                                                                                           | true                               | Should lwpMediaDevices manage the HTMLMediaElement parameters                                                                                                                                                                                           |
 | renderTargets                           | array                                                                                             | []                                 | See [lwpRenderer](lwpRenderer.md)                                                                                                                                                                                                                       |
 
+> **How `preferedDeviceIds` is resolved.** The list is consulted in order at
+> startup: the **first id that is both present and connected** is selected, so a
+> second entry only takes effect when the entries ahead of it are unplugged. Ids
+> absent from the list rank behind every id in it, and the whole list ranks ahead
+> of whatever `getUserMedia()` happened to resolve to. The same ordering drives
+> [refreshAvailableDevices()](#refreshavailabledevices) - reconnecting a device
+> that outranks the one in use switches back to it. Choosing a device at runtime
+> through [changeDevice()](#changedevicedevicekind-deviceid) moves it to the front
+> of the list, making it the new first choice.
+
 ## Events
 
 ### Emitted

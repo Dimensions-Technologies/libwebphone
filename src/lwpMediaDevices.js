@@ -579,7 +579,7 @@ export default class extends lwpRenderer {
           ).forEach((parameterName) => {
             this._config[deviceKind].mediaElement.element[parameterName] =
               this._config[deviceKind].mediaElement.initParameters[
-              parameterName
+                parameterName
               ];
           });
         }
@@ -621,13 +621,13 @@ export default class extends lwpRenderer {
       // Add screenCapture device if screenCapture is enabled in config
       ...(this._config.videoinput.screenCapture
         ? [
-          this._deviceParameters({
-            deviceId: "screenCapture",
-            label: "libwebphone:mediaDevices.screenCapture",
-            kind: "videoinput",
-            displayOrder: 1,
-          }),
-        ]
+            this._deviceParameters({
+              deviceId: "screenCapture",
+              label: "libwebphone:mediaDevices.screenCapture",
+              kind: "videoinput",
+              displayOrder: 1,
+            }),
+          ]
         : []),
     ];
   }
@@ -694,22 +694,21 @@ export default class extends lwpRenderer {
         this._sortAvailableDevices();
 
         Object.keys(this._availableDevices).forEach((deviceKind) => {
-          var selectedDevice = false;
-          if (!selectedDevice && this._config[deviceKind].preferedDeviceIds.length > 0) {
-            const preferredDevice = this._availableDevices[deviceKind].find(
-              (availableDevice) => {
-                return this._config[deviceKind].preferedDeviceIds.some((preferedDeviceId) => {
-                  return availableDevice.id == preferedDeviceId;
-                });
-              });
+          let selectedDevice = (
+            this._config[deviceKind].preferedDeviceIds || []
+          )
+            .map((preferedDeviceId) => {
+              return this._findAvailableDevice(deviceKind, preferedDeviceId);
+            })
+            .find((availableDevice) => {
+              return availableDevice && availableDevice.connected;
+            });
 
-            if (preferredDevice) {
-              preferredDevice.selected = true;
-              selectedDevice = true;
-            }
-            else {
-              selectedDevice = false;
-            }
+          if (selectedDevice) {
+            this._availableDevices[deviceKind].forEach((availableDevice) => {
+              availableDevice.selected =
+                availableDevice.id == selectedDevice.id;
+            });
           }
 
           if (!selectedDevice) {
@@ -721,9 +720,10 @@ export default class extends lwpRenderer {
           }
 
           if (!selectedDevice) {
-            const availableDevice = this._availableDevices[deviceKind][0];
-            if (availableDevice) {
-              availableDevice.selected = true;
+            selectedDevice = this._availableDevices[deviceKind][0];
+
+            if (selectedDevice) {
+              selectedDevice.selected = true;
             }
           }
         });
@@ -751,6 +751,8 @@ export default class extends lwpRenderer {
             }
           }
         });
+
+        this._applyInputDeviceSelection(mediaStream);
 
         this._loaded = true;
         this._emit("devices.loaded", this, this._availableDevices);
@@ -1188,6 +1190,46 @@ export default class extends lwpRenderer {
     return this._changeSecondaryRingOutputDevice(noneDevice);
   }
 
+  async _applyInputDeviceSelection(mediaStream) {
+    if (!mediaStream) {
+      return;
+    }
+
+    const liveTracks = mediaStream.getTracks().filter((track) => {
+      return track.readyState == "live";
+    });
+
+    for (const track of liveTracks) {
+      const deviceKind = lwpUtils.trackKindtoDeviceKind(track.kind);
+      const selectedDevice = this.getPreferedDevice(deviceKind);
+      const trackParameters = lwpUtils.trackParameters(mediaStream, track);
+
+      if (
+        !selectedDevice ||
+        !selectedDevice.connected ||
+        !trackParameters ||
+        trackParameters.settings.deviceId == selectedDevice.id
+      ) {
+        continue;
+      }
+
+      const release = await this._changeStreamMutex.acquire();
+
+      // finally(), not then(): a rejection would otherwise hold the mutex
+      // forever, deadlocking every subsequent device change.
+      await Promise.resolve(this._changeInputDevice(selectedDevice))
+        .catch((error) => {
+          console.warn(
+            "[lwpMediaDevices] could not move the live " +
+              track.kind +
+              " track onto the configured device",
+            error
+          );
+        })
+        .finally(release);
+    }
+  }
+
   _isOutputAudible(deviceKind) {
     const audioContext = this._libwebphone.getAudioContext();
 
@@ -1495,7 +1537,7 @@ export default class extends lwpRenderer {
         if (this._config.manageMediaElements && element && element.paused) {
           // TODO: without the interaction history of my dev site, can we still
           //  issue a play this early?
-          element.play().catch(() => { });
+          element.play().catch(() => {});
         }
       } else {
         if (this._config.manageMediaElements && element && !element.paused) {
@@ -1813,10 +1855,14 @@ export default class extends lwpRenderer {
         enumeratedDevice.displayOrder =
           this._availableDevices[device.kind].length;
 
+        const preferedDeviceIds =
+          this._config[device.kind].preferedDeviceIds || [];
+        const preferenceIndex = preferedDeviceIds.indexOf(enumeratedDevice.id);
+
         enumeratedDevice.preference =
-          (this._config[device.kind].preferedDeviceIds || []).indexOf(
-            enumeratedDevice.id
-          ) + 1;
+          preferenceIndex > -1
+            ? preferedDeviceIds.length - preferenceIndex
+            : 0;
 
         this._availableDevices[device.kind].push(enumeratedDevice);
       }
