@@ -812,10 +812,11 @@ export default class {
             // The SIP-level termination cause below will report as
             // "Rejected" (JsSIP hardcodes that for terminating a
             // not-yet-answered session), not the more specific
-            // "User Denied Media Access" - log that explicitly here so the
-            // real reason is traceable/searchable even though the SIP cause
-            // itself is generic.
+            // "User Denied Media Access" - _noUsableMedia flags this for the
+            // "failed" binding below, which rewrites the cause on the event
+            // we emit so listeners can tell this apart from a real decline.
             console.warn("[lwpCall] answer(): no usable media available (cause: User Denied Media Access) for call " + this.getId() + "; rejecting the call (SIP termination cause will report as: Rejected)");
+            this._noUsableMedia = true;
             this._getSession().terminate({ status_code: 480, reason_phrase: "No Media Available" });
             return;
           }
@@ -847,6 +848,7 @@ export default class {
           // is not what "reject" means, and would emit a "rejected" for a
           // call nobody rejected.
           if (this.isInProgress() && !this.isEnded()) {
+            this._noUsableMedia = true;
             this.reject();
           }
         });
@@ -1052,6 +1054,14 @@ export default class {
     this._remoteIdentityOverride = null;
 
     this._muteHint = false;
+
+    // Set right before we self-terminate a not-yet-answered session because
+    // our own media pipeline couldn't produce a usable stream (see answer()).
+    // JsSIP hardcodes the SIP-level failure cause to "Rejected" for that
+    // termination - identical to a real user decline - so this flag is the
+    // only way the "failed" binding below can tell them apart and report the
+    // real cause instead.
+    this._noUsableMedia = false;
 
     this._config = this._libwebphone._config.call;
 
@@ -1279,6 +1289,12 @@ export default class {
       });
       this._getSession().on("failed", (...event) => {
         this._destroyCall();
+        if (this._noUsableMedia && event[0]) {
+          // Rewrite the generic "Rejected" cause JsSIP always reports for
+          // this termination into the specific reason a listener actually
+          // needs, so it isn't indistinguishable from a real user decline.
+          event[0] = { ...event[0], cause: "User Denied Media Access" };
+        }
         this._emit("failed", this, ...event);
       });
       this._getSession().on("peerconnection", (...data) => {
