@@ -53,6 +53,8 @@ export default class extends lwpRenderer {
             subscriber: null,
             lastNotify: null,
             timeoutHandle: null,
+            resubscribeAttempts: 0,
+            resubscribeTimeoutHandle: null,
         };
 
         this._keys.push(key);
@@ -105,8 +107,9 @@ export default class extends lwpRenderer {
     _initProperties(config) {
         const defaults = {
             keys: [],
-            subscribe_expires: 3600,
+            subscribe_expires: 1800,
             resubscribe_delay: 1000,
+            max_resubscribe_delay: 60000,
             notify_timeout: 60000,
             renderTargets: [],
         };
@@ -124,6 +127,8 @@ export default class extends lwpRenderer {
                     subscriber: null,
                     lastNotify: null,
                     timeoutHandle: null,
+                    resubscribeAttempts: 0,
+                    resubscribeTimeoutHandle: null,
                 },
                 key
             );
@@ -168,7 +173,14 @@ export default class extends lwpRenderer {
     }
 
     _subscribe(key) {
-        this._unsubscribe(key);
+        // Internal teardown only: no "key.unsubscribed" event and no forced status
+        // change here. This used to call the public _unsubscribe(), which fired a
+        // phantom "key.unsubscribed" (and idle flap) on every rebuild — including
+        // registration refreshes and the watchdog below re-arming a healthy key.
+        this._clearNotifyTimeout(key);
+        this._clearResubscribeTimeout(key);
+        this._clearSubscriber(key);
+        key.lastNotify = null;
 
         const userAgent = this._libwebphone.getUserAgent();
         if (!userAgent || !userAgent.isRegistered()) {
@@ -196,6 +208,7 @@ export default class extends lwpRenderer {
 
         subscriber.on("notify", (is_final, request, body, content_type) => {
             key.lastNotify = new Date();
+            key.resubscribeAttempts = 0; // any NOTIFY proves the subscription is alive; forgive past failures
 
             console.log(`BLF [${key.id}]: NOTIFY received at`, key.lastNotify.toISOString());
             console.log(`BLF [${key.id}]: Content-Type:`, content_type);
@@ -230,14 +243,29 @@ export default class extends lwpRenderer {
             if (key.subscriber !== subscriber) {
                 return;
             }
-            console.warn(`BLF [${key.id}]: Subscription terminated by server, code=${code} reason=${reason}, resubscribing in ${this._config.resubscribe_delay}ms`);
+            // Exponential backoff, capped: a server that keeps rejecting this
+            // subscription (or a key that will never resolve) settles into an
+            // infrequent retry instead of hammering the server once a second
+            // forever. Any NOTIFY (see above) resets the attempt count.
+            const delay = Math.min(
+                this._config.resubscribe_delay * Math.pow(2, key.resubscribeAttempts),
+                this._config.max_resubscribe_delay
+            );
+            key.resubscribeAttempts++;
+            console.warn(`BLF [${key.id}]: Subscription terminated by server, code=${code} reason=${reason}, resubscribing in ${delay}ms (attempt ${key.resubscribeAttempts})`);
             key.subscriber = null;
-            this._updateKeyStatus(key, "idle");
-            setTimeout(() => this._subscribe(key), this._config.resubscribe_delay);
+            this._clearNotifyTimeout(key); // avoid racing the confirm-timeout below into a second resubscribe
+            this._updateKeyStatus(key, "unknown"); // lost the subscription; we no longer know the real state
+            key.resubscribeTimeoutHandle = setTimeout(() => this._subscribe(key), delay);
         });
 
-        subscriber.subscribe();
+        // Assign before calling subscribe(): if subscribe() fails synchronously
+        // (e.g. no transport) it fires "terminated" before this line would otherwise
+        // run, and the terminated handler's identity guard needs key.subscriber to
+        // already point at this subscriber to recognize it as a real failure worth
+        // resubscribing, rather than silently discarding it as a zombie.
         key.subscriber = subscriber;
+        subscriber.subscribe();
 
         this._scheduleNotifyTimeout(key);
         this._emit("key.subscribed", this, key);
@@ -245,8 +273,12 @@ export default class extends lwpRenderer {
 
     _unsubscribe(key) {
         this._clearNotifyTimeout(key);
+        this._clearResubscribeTimeout(key);
         this._clearSubscriber(key);
-        this._updateKeyStatus(key, "idle");
+        // "idle" would claim we know the extension is free; we've just lost visibility
+        // into it entirely, so "unknown" is the honest status (a WS drop shouldn't turn
+        // every lamp green).
+        this._updateKeyStatus(key, "unknown");
         this._emit("key.unsubscribed", this, key);
     }
 
@@ -263,15 +295,20 @@ export default class extends lwpRenderer {
     }
 
     _scheduleNotifyTimeout(key) {
+        // One-shot confirmation deadline, not a recurring keepalive check. RFC 6665
+        // does not require a notifier to keep sending NOTIFYs for state that hasn't
+        // changed, so an idle extension going quiet after its first NOTIFY is normal,
+        // not a dead subscription — rebuilding it every notify_timeout was the churn.
+        // The one real failure mode this needs to catch is a SUBSCRIBE that never gets
+        // its initial NOTIFY at all; once that first NOTIFY lands, ongoing health is
+        // covered by JsSIP's own refresh-before-expiry SUBSCRIBEs and the "terminated"
+        // handler above.
         this._clearNotifyTimeout(key);
         key.timeoutHandle = setTimeout(() => {
-            if (
-                key.lastNotify &&
-                new Date() - key.lastNotify > this._config.notify_timeout
-            ) {
+            key.timeoutHandle = null;
+            if (!key.lastNotify) {
+                console.warn(`BLF [${key.id}]: No NOTIFY received within ${this._config.notify_timeout}ms of subscribing; treating subscription as dead and resubscribing`);
                 this._subscribe(key);
-            } else {
-                this._scheduleNotifyTimeout(key);
             }
         }, this._config.notify_timeout);
     }
@@ -280,6 +317,15 @@ export default class extends lwpRenderer {
         if (key.timeoutHandle) {
             clearTimeout(key.timeoutHandle);
             key.timeoutHandle = null;
+        }
+    }
+
+    _clearResubscribeTimeout(key) {
+        // Cancels a pending backoff retry so a removed/torn-down key can't
+        // resurrect a subscription after it was told to stop.
+        if (key.resubscribeTimeoutHandle) {
+            clearTimeout(key.resubscribeTimeoutHandle);
+            key.resubscribeTimeoutHandle = null;
         }
     }
 

@@ -182,8 +182,9 @@
             "blf_default"
         ],
         "keys": [],
-        "subscribe_expires": 3600,
+        "subscribe_expires": 1800,
         "resubscribe_delay": 1000,
+        "max_resubscribe_delay": 60000,
         "notify_timeout": 60000
     },
     "quickConnect": [
