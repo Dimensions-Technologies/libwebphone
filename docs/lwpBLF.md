@@ -14,13 +14,18 @@ configured per key.
 
 Subscriptions are resilient by design, not fire-and-forget:
 - If the server terminates a subscription unexpectedly (expiry, error), it is
-  automatically resubscribed after `resubscribe_delay`. A subscription that
-  was terminated intentionally (`unsubscribe()`/`removeKey()`) is not
-  resubscribed - the class tracks *why* a subscription ended to tell the two
-  cases apart.
-- A watchdog independently re-subscribes if no NOTIFY has arrived within
-  `notify_timeout` of the last one, defending against a subscription going
-  silently stale without the server ever sending a terminated event.
+  automatically resubscribed after `resubscribe_delay`, doubling on each
+  consecutive failure up to `max_resubscribe_delay` so a server that keeps
+  rejecting the subscription is polled infrequently rather than hammered.
+  Any NOTIFY received resets the backoff, since it proves the subscription is
+  actually working again. A subscription that was terminated intentionally
+  (`unsubscribe()`/`removeKey()`) is not resubscribed - the class tracks *why*
+  a subscription ended to tell the two cases apart.
+- A one-shot watchdog re-subscribes if the initial NOTIFY never arrives within
+  `notify_timeout` of subscribing, defending against a SUBSCRIBE that's
+  silently accepted but never confirmed. It does not recur once that first
+  NOTIFY lands - an idle extension going quiet afterwards is normal, not a
+  dead subscription.
 - Subscriptions follow SIP registration automatically: all keys subscribe on
   `userAgent.registration.registered` and unsubscribe on
   `userAgent.registration.unregistered`/`userAgent.disconnected`/
@@ -123,9 +128,10 @@ Re-paint / update all render targets.
 | ------------------ | ------- | ---------------------------------- | ----------------------------------------------------------------------------- |
 | enabled            | boolean | true                               | Enables/disables the class instance                                          |
 | keys               | array   | []                                 | Initial keys to monitor - each `{ id, name, eventType, acceptType }`, matching `addKey()`'s parameters. Subscribed automatically on registration, same as a key added later via `addKey()` |
-| subscribe_expires  | number  | 3600                               | SIP SUBSCRIBE expiry, in seconds                                              |
-| resubscribe_delay  | number  | 1000                               | Delay (ms) before automatically resubscribing after an unexpected server-side termination |
-| notify_timeout     | number  | 60000                              | Watchdog interval (ms) - if no NOTIFY arrives within this window of the last one, proactively resubscribes |
+| subscribe_expires  | number  | 1800                               | SIP SUBSCRIBE expiry, in seconds                                              |
+| resubscribe_delay  | number  | 1000                               | Initial delay (ms) before automatically resubscribing after an unexpected server-side termination; doubles on each consecutive failure up to max_resubscribe_delay |
+| max_resubscribe_delay | number | 60000                            | Ceiling (ms) for the resubscribe backoff delay                               |
+| notify_timeout     | number  | 60000                              | One-shot confirmation deadline (ms) - if the initial NOTIFY never arrives after subscribing, treats the subscription as dead and resubscribes. Does not fire again once a NOTIFY has been received; ongoing health is covered by JsSIP's own refresh-before-expiry SUBSCRIBEs |
 | renderTargets      | array   | []                                 | See [lwpRenderer](lwpRenderer.md)                                             |
 
 ## Events
