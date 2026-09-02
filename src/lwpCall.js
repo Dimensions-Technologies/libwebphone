@@ -59,7 +59,7 @@ export default class {
       const wantFull = allowed.map(s => String(s).toLowerCase());
       const wantName = allowed.map(s => String(s).split('/')[0].toLowerCase());
       // Find m-line
-      const mLineRegex = new RegExp('(m=' + kind + ' \\d+ [A-Z/]+ )([0-9 ]+)\\r?\\n([\\s\\S]*?)(?=\\r?\\nm=|$)', 'i');
+      const mLineRegex = new RegExp('(m=' + kind + ' \\d+ [A-Z/]+ )([0-9 ]+)\\r?\\n([\\s\\S]*?)(?=\\r?\\nm=|$)', 'gi');
         return sdp.replace(mLineRegex, (whole, pre, pts, body) => {
       // Map PT -> codec name/full
       const ptToName = {}, ptToFull = {};
@@ -68,6 +68,12 @@ export default class {
         const full = (name + '/' + rate + (ch ? ('/' + ch) : '')).toLowerCase();
         ptToName[pt] = name.toLowerCase();
         ptToFull[pt] = full;
+            });
+      // Map PT -> fmtp parameters, needed to resolve the association a wrapper
+      // payload type (rtx, red) declares on the codec it carries.
+      const ptToFmtp = {};
+      body.replace(/a=fmtp:(\d+)[ \t]+(.*)/g, (_, pt, params) => {
+        ptToFmtp[pt] = params;
             });
       const list = pts.trim().split(/\s+/);
       // Ancillaries always kept at end
@@ -83,17 +89,67 @@ export default class {
             const name = ptToName[pt];
             if (isAnc(pt)) { keptAnc.push(pt); continue; }
             if (!full && !name) continue;
-            if (wantFull.indexOf(full) !== -1 || wantName.indexOf(name) !== -1) {
-        keptPreferred.push(pt);
+            const fullRank = wantFull.indexOf(full);
+            const nameRank = wantName.indexOf(name);
+            if (fullRank !== -1 || nameRank !== -1) {
+        // Rank by position in the configured list, preferring an exact
+        // "name/rate/channels" match over a bare name match, so the offer
+        // follows the documented preference order rather than the order the
+        // browser happened to generate.
+        keptPreferred.push({ pt: pt, rank: fullRank !== -1 ? fullRank : nameRank });
             }
       }
       if (!keptPreferred.length) return whole; // fallback: keep original
-      const newPts = keptPreferred.concat(keptAnc);
+      // Stable sort (guaranteed by the language), so payload types matching the
+      // same preference entry keep the browser's relative order.
+      keptPreferred.sort((a, b) => a.rank - b.rank);
+      const orderedPreferred = keptPreferred.map(entry => entry.pt);
+
+      // An ancillary is not a codec choice, but rtx and red are wrappers: rtx
+      // retransmits another payload type ("apt=<pt>") and red encapsulates the
+      // payload types listed in its fmtp ("<pt>/<pt>"). Keeping one after its
+      // target has been filtered out leaves the reference dangling, which makes
+      // the offer self-inconsistent and can be rejected by strict far ends.
+      // telephone-event, cn and ulpfec declare no association, so they always stay.
+      const survives = {};
+      orderedPreferred.forEach(pt => { survives[pt] = true; });
+      const isRtx = pt => /^rtx$/i.test(ptToName[pt] || '');
+      const referencedPts = pt => {
+        const params = ptToFmtp[pt] || '';
+        const apt = params.match(/(?:^|;)\s*apt\s*=\s*(\d+)/i);
+        if (apt) {
+          return [apt[1]];
+        }
+        // Only parse the "<pt>/<pt>" form for red itself - other ancillaries use
+        // fmtp for unrelated values (telephone-event carries an event range).
+        if (/^red$/i.test(ptToName[pt] || '')) {
+          const carried = params.trim().match(/^\d+(?:\/\d+)*$/);
+          if (carried) {
+            return carried[0].split('/');
+          }
+        }
+        return [];
+      };
+      const ancKeep = {};
+      const resolveAnc = pt => {
+        if (referencedPts(pt).every(ref => survives[ref])) {
+          ancKeep[pt] = true;
+          survives[pt] = true;
+        }
+      };
+      // red before rtx, since an rtx payload type may be associated with red.
+      keptAnc.filter(pt => !isRtx(pt)).forEach(resolveAnc);
+      keptAnc.filter(isRtx).forEach(resolveAnc);
+      const newPts = orderedPreferred.concat(keptAnc.filter(pt => ancKeep[pt]));
       // Filter attribute lines to only the kept PTs
       const keep = {};
       for (let k = 0; k < newPts.length; k++) keep[newPts[k]] = true;
             const filteredBody = body.split(/\r?\n/).filter(line => {
-            const m = line.match(/^a=(rtpmap|fmtp|rtcp-fb|extmap):(\d+)/);
+            // NB: only rtpmap/fmtp/rtcp-fb are keyed by payload type. The
+            // number after "a=extmap:" is an RTP header-extension ID from a
+            // different namespace, so extmap lines must never be filtered
+            // against the kept payload types.
+            const m = line.match(/^a=(rtpmap|fmtp|rtcp-fb):(\d+)/);
             if (!m) return true;
             return !!keep[m[2]];
       }).join("\r\n");
