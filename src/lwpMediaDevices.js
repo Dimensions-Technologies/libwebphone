@@ -115,10 +115,11 @@ export default class extends lwpRenderer {
     this._startedStreams = [];
 
     return this._mediaStreamPromise.then((mediaStream) => {
-      // Nothing to stop/clean up if we never had a real stream - do not
-      // attempt recovery here, that would acquire media just to immediately
-      // tear it down again.
-      if (!mediaStream) {
+      // Nothing to stop/clean up if we never had a real stream, or it's
+      // already empty (e.g. a prior dispose already ran) - do not attempt
+      // recovery here, that would acquire media just to immediately tear
+      // it down again.
+      if (!mediaStream || mediaStream.getTracks().length === 0) {
         return;
       }
 
@@ -128,6 +129,20 @@ export default class extends lwpRenderer {
 
       this._inputActive = false;
       this._emit("streams.stopped", this);
+
+      // Dispose the shared stream outright rather than leaving
+      // _mediaStreamPromise pointing at this now-empty MediaStream object.
+      // Resolve to a fresh, empty MediaStream - not null. _muteInput/
+      // _unmuteInput/_toggleMuteInput and the device-switch refresh logic
+      // all read _mediaStreamPromise directly and call .getTracks() on it
+      // with no null guard, so it must always resolve to a real object.
+      // An empty stream is enough: _startInputStreams() already forces a
+      // brand-new getUserMedia() call whenever the current stream has no
+      // live tracks, so the next call still acquires media fresh. The
+      // recovery logic in _ensureMediaStream() stays in place as a
+      // fallback for cases this doesn't cover, such as losing a track
+      // mid-call while another call is still active.
+      this._mediaStreamPromise = Promise.resolve(new MediaStream());
     });
   }
 
