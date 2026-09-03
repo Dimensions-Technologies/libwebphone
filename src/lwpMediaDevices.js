@@ -1,10 +1,23 @@
 "use strict";
 
+import * as JsSIP from "jssip";
+
 import lwpUtils from "./lwpUtils";
 import lwpRenderer from "./lwpRenderer";
 import { Mutex } from "async-mutex";
 // eslint-disable-next-line no-unused-vars
 import adapter from "webrtc-adapter";
+
+// Namespaced logger on JsSIP's own `debug` instance, the same arrangement
+// lwpAudioContext uses for "libwebphone:callWaiting" - so lwpUserAgent's
+// existing debug toggle switches this on alongside the SIP trace rather than
+// needing a setting of its own, and the two interleave in the order things
+// actually happened.
+const mediaDevicesDebug = JsSIP.debug("libwebphone:mediaDevices");
+
+// `debug`'s browser build writes to console.debug, which Chrome files under
+// Verbose and hides by default. Match what the rest of libwebphone logs.
+mediaDevicesDebug.log = console.log.bind(console);
 
 export default class extends lwpRenderer {
   constructor(libwebphone, config = {}) {
@@ -26,6 +39,16 @@ export default class extends lwpRenderer {
   // in its own try/catch - a failure or slowness here must never delay or
   // break the actual call flow. Not awaited by the caller on purpose.
   _logMediaSnapshot(context) {
+    // Gated, and gated first. Device and track labels are user-identifying
+    // strings ("<name>'s AirPods"), this runs on every call, dial, loopback
+    // preview and conference add, and error-reporting SDKs routinely capture
+    // console output as breadcrumbs - so unconditional logging sends those
+    // labels somewhere nobody chose to send them. Disabled it costs one
+    // property read and builds nothing.
+    if (!mediaDevicesDebug.enabled) {
+      return;
+    }
+
     try {
       const devices = {};
       Object.keys(this._availableDevices || {}).forEach((kind) => {
@@ -36,7 +59,7 @@ export default class extends lwpRenderer {
           connected: d.connected,
         }));
       });
-      console.debug("[lwpMediaDevices] device snapshot (" + context + ")", devices);
+      mediaDevicesDebug("device snapshot (" + context + ")", devices);
 
       Promise.resolve(this._mediaStreamPromise)
         .then((mediaStream) => {
@@ -49,10 +72,10 @@ export default class extends lwpRenderer {
                 muted: track.muted,
               }))
             : null;
-          console.debug("[lwpMediaDevices] current stream snapshot (" + context + ")", tracks);
+          mediaDevicesDebug("current stream snapshot (" + context + ")", tracks);
         })
         .catch((error) => {
-          console.debug("[lwpMediaDevices] current stream snapshot (" + context + ") - promise rejected", error);
+          mediaDevicesDebug("current stream snapshot (" + context + ") - promise rejected", error);
         });
     } catch (error) {
       console.warn("[lwpMediaDevices] _logMediaSnapshot failed (non-fatal, does not affect the call)", error);
@@ -64,7 +87,24 @@ export default class extends lwpRenderer {
     this._startMediaElements();
 
     if (this._inputActive) {
-      return this._ensureMediaStream().then((mediaStream) => {
+      // recover: this branch has no acquisition of its own - it clones the
+      // shared stream straight into a call stream - so if that stream has
+      // no live tracks nothing else will go and get them, and the call
+      // would connect with silent audio. This is the path WI35397 wedged
+      // on.
+      return this._ensureMediaStream(null, true).then((mediaStream) => {
+        // The same contract as the acquisition branch below: startStreams()
+        // either resolves media a call can actually use, or it rejects.
+        // Resolving an empty stream here would let lwpUserAgent.call(),
+        // which has no track check of its own, dial out and connect
+        // silently mute - no error, no event, the user only finding out
+        // from the far end.
+        if (
+          !mediaStream.getTracks().some((track) => track.readyState == "live")
+        ) {
+          throw new Error("no usable input media available");
+        }
+
         return this._createCallStream(mediaStream, requestId);
       });
     }
@@ -114,20 +154,34 @@ export default class extends lwpRenderer {
     });
     this._startedStreams = [];
 
-    return this._mediaStreamPromise.then((mediaStream) => {
+    return this._readMediaStream().then((mediaStream) => {
+      const tracks = mediaStream ? mediaStream.getTracks() : [];
+
+      // Cleared before anything below can return early. _inputActive is
+      // what startStreams() trusts to decide it already holds usable
+      // media, and that branch clones the shared stream without ever
+      // calling getUserMedia - so a teardown that returns with the flag
+      // still set leaves every later call cloning a stream with no tracks,
+      // for the life of the page, however available the microphone
+      // becomes. That was WI35397: the phone went permanently dead after a
+      // single transient acquisition failure and only a reload recovered
+      // it. Whatever else this method decides it has nothing to do, it
+      // must always leave the flag false.
+      this._inputActive = false;
+
       // Nothing to stop/clean up if we never had a real stream, or it's
       // already empty (e.g. a prior dispose already ran) - do not attempt
       // recovery here, that would acquire media just to immediately tear
-      // it down again.
-      if (!mediaStream || mediaStream.getTracks().length === 0) {
+      // it down again, and do not emit a second streams.stopped for a
+      // teardown that stopped nothing.
+      if (tracks.length === 0) {
         return;
       }
 
-      mediaStream.getTracks().forEach((track) => {
+      tracks.forEach((track) => {
         this._removeTrack(mediaStream, track, false);
       });
 
-      this._inputActive = false;
       this._emit("streams.stopped", this);
 
       // Dispose the shared stream outright rather than leaving
@@ -538,6 +592,8 @@ export default class extends lwpRenderer {
 
     this._changeStreamMutex = new Mutex();
 
+    this._recoveryPromise = null;
+
     this._inputActive = false;
 
     this._startedStreams = [];
@@ -788,7 +844,13 @@ export default class extends lwpRenderer {
     }
 
     this._libwebphone.on("audioContext.preview.loopback.started", () => {
-      this.startStreams("loopbackPreview");
+      // Caught because startStreams() now rejects when no media could be
+      // acquired; nothing awaits this one, so without it a failed loopback
+      // preview would surface only as an unhandled rejection. The host has
+      // already had getUserMedia.error for the underlying cause.
+      this.startStreams("loopbackPreview").catch((error) => {
+        console.warn("[lwpMediaDevices] loopback preview could not start", error);
+      });
     });
     this._libwebphone.on("audioContext.preview.loopback.stopped", () => {
       this.stopStreams("loopbackPreview");
@@ -1442,6 +1504,56 @@ export default class extends lwpRenderer {
     });
   }
 
+  // A rejected _mediaStreamPromise is otherwise permanent.
+  // _initInputStreams() assigns the field once and never reassigns it on
+  // failure, so denying the permission prompt at page load (both kinds
+  // requested, then the audio-only retry denied too) leaves every reader of
+  // the field - mute, device switching, every call - waiting on that same
+  // rejection for the life of the page, with no way back short of a reload.
+  // Every read goes through here so the poison is replaced rather than
+  // merely read past, and the replacement is handed onward so whoever fills
+  // it is filling the object the field actually points at.
+  _readMediaStream() {
+    return this._mediaStreamPromise.catch((error) => {
+      console.warn("[lwpMediaDevices] _mediaStreamPromise was left rejected; clearing it", error);
+
+      const replacement = new MediaStream();
+
+      this._mediaStreamPromise = Promise.resolve(replacement);
+
+      return replacement;
+    });
+  }
+
+  // getUserMedia() is all-or-nothing across kinds, so a single unavailable
+  // camera fails a combined request outright and takes a perfectly good
+  // microphone down with it. Both other acquisition sites already drop
+  // video and retry; this exists so the recovery path in
+  // _ensureMediaStream() has the same ladder rather than giving up on an
+  // audio call because of a webcam.
+  //
+  // Only the final failure emits getUserMedia.error - the intermediate one
+  // is recoverable and reporting it would surface an error to the host for
+  // a request that then succeeded. _initInputStreams() and
+  // _startInputStreams() still carry their own copies of this ladder,
+  // wrapped in different post-processing (_updateMediaElements vs
+  // _addTrack); they should be migrated onto this helper rather than a
+  // fourth copy being written.
+  _acquireWithVideoFallback(constraints) {
+    return this._shimGetUserMedia(constraints).catch((error) => {
+      if (!constraints.video || !constraints.audio) {
+        throw error;
+      }
+
+      const audioOnly = Object.assign({}, constraints);
+      delete audioOnly.video;
+
+      console.warn("[lwpMediaDevices] combined audio+video acquisition failed; retrying audio only", error);
+
+      return this._shimGetUserMedia(audioOnly);
+    });
+  }
+
   // _mediaStreamPromise is set exactly once, in _initInputStreams(), and is
   // never reassigned afterwards even if a later recovery attempt succeeds -
   // every reader (mute, device switching, subsequent calls) shares this one
@@ -1452,17 +1564,89 @@ export default class extends lwpRenderer {
   // MediaStream without persisting a real recovery back to the shared
   // promise is what causes mute/device-switching to silently stop working
   // for the rest of the session - do not reintroduce that.
-  _ensureMediaStream(constraints = null) {
-    return this._mediaStreamPromise.then((mediaStream) => {
-      if (mediaStream) {
-        return mediaStream;
+  //
+  // recover is opt-in because an empty shared stream is the normal resting
+  // state between calls: stopAllStreams() stops and removes every track
+  // when the last call ends. Only a caller with no acquisition logic of its
+  // own needs this function to go and get media - startStreams()'s
+  // _inputActive branch, which clones straight from whatever comes back.
+  // _startInputStreams() and _changeInputDevice() both acquire what they
+  // need themselves, so for them an empty stream is a container to fill,
+  // not a fault to report.
+  _ensureMediaStream(constraints = null, recover = false) {
+    return this._readMediaStream().then((mediaStream) => {
+      // Liveness, not truthiness. An emptied or ended MediaStream is still
+      // a truthy object, so testing the reference alone answered "yes, we
+      // have media" for a stream carrying nothing - short-circuiting the
+      // recovery below, which is the entire point of this function, into
+      // unreachable code. Callers want a stream they can clone working
+      // tracks from, so that is what the guard has to ask.
+      const hasLiveTracks =
+        mediaStream &&
+        mediaStream.getTracks().some((track) => track.readyState == "live");
+
+      // Always a real object, never null: _muteInput/_unmuteInput/
+      // _toggleMuteInput and the device-switch refresh logic all read
+      // _mediaStreamPromise directly and call .getTracks() with no guard.
+      if (hasLiveTracks || !recover) {
+        return mediaStream || new MediaStream();
       }
 
-      console.warn("[lwpMediaDevices] _mediaStreamPromise resolved without a usable MediaStream; attempting recovery");
+      // An empty object is truthy, so `constraints || _createConstraints()`
+      // treated {} as a usable constraint set and handed it to
+      // getUserMedia, which rejects with a TypeError rather than a media
+      // error. refreshAvailableDevices() reaches _startInputStreams({}),
+      // which forwards it here, so fall back to _createConstraints() on an
+      // empty set rather than only on a missing one.
+      const effectiveConstraints =
+        constraints && Object.keys(constraints).length
+          ? constraints
+          : this._createConstraints();
+
+      // Nothing was asked for, so there is nothing to recover. This is a
+      // real configuration, not a failure: audioinput selected as "none"
+      // with videoinput disabled makes _createConstraints() legitimately
+      // return {}. Attempting recovery there would report a misleading
+      // getUserMedia.error on every single call. Such a deployment still
+      // cannot take calls - lwpCall's hasTracks check cannot tell "no
+      // input configured" from "acquisition failed" - but that is a
+      // separate, parked issue and not something to compound with a
+      // spurious error. (Recovery only became reachable with the liveness
+      // guard above, so none of this could fire before.)
+      if (Object.keys(effectiveConstraints).length == 0) {
+        return mediaStream || new MediaStream();
+      }
+
+      if (this._recoveryPromise) {
+        // Shared rather than duplicated. Nothing serialises this function,
+        // so two consumers entering recovery at once - a devicechange
+        // refresh alongside an incoming call, or two calls in the same tick
+        // - would each issue their own getUserMedia, and the loser's stream
+        // would be dropped without stop(), leaving the operating system's
+        // microphone indicator lit on an orphaned capture.
+        //
+        // Deliberately not _changeStreamMutex: refreshAvailableDevices()
+        // and the device-reconcile loop both hold that lock across calls
+        // that reach here, and async-mutex is not reentrant - acquiring it
+        // would deadlock rather than serialise.
+        return this._recoveryPromise;
+      }
+
+      console.warn("[lwpMediaDevices] _mediaStreamPromise resolved without live tracks; attempting recovery");
       this._emit("mediaStreamPromise.recovering", this);
 
-      return this._shimGetUserMedia(constraints || this._createConstraints())
+      this._recoveryPromise = this._acquireWithVideoFallback(effectiveConstraints)
         .then((recoveredMediaStream) => {
+          // Registered through _addTrack rather than merely handed back:
+          // that is what marks the device selected in _availableDevices and
+          // fires <kind>.input.started, so the device pickers reflect what
+          // is actually live instead of whatever was selected before the
+          // failure. Recovery only became reachable with the liveness guard
+          // above, so this path had never run before.
+          recoveredMediaStream.getTracks().forEach((track) => {
+            this._addTrack(recoveredMediaStream, track);
+          });
+
           this._updateMediaElements(recoveredMediaStream);
           // Persist the recovery so every other reader of _mediaStreamPromise
           // (not just this call) sees the real stream from now on.
@@ -1477,7 +1661,15 @@ export default class extends lwpRenderer {
           // _mediaStreamPromise - leave it broken so the next attempt tries
           // again, rather than permanently caching a dead stream.
           return new MediaStream();
+        })
+        // finally(), not then(): the slot has to clear on the failure path
+        // too, or one failed recovery would pin every later attempt to its
+        // result for the life of the page.
+        .finally(() => {
+          this._recoveryPromise = null;
         });
+
+      return this._recoveryPromise;
     });
   }
 
@@ -1528,8 +1720,41 @@ export default class extends lwpRenderer {
                 return mediaStream;
               });
           }
+
+          // Propagated rather than swallowed. Resolving here hands
+          // startStreams() a stream with nothing in it, which it then
+          // caches as active media (_inputActive = true) - so the failure
+          // is recorded as a success and no later call retries
+          // getUserMedia. All three startStreams() consumers
+          // (lwpCall.answer(), lwpUserAgent.call(),
+          // lwpConference.addToConference()) have catch handlers that
+          // surface this to the host; getUserMedia.error was already
+          // emitted above.
+          //
+          // Only when nothing usable survives: a partial acquisition (say
+          // a live camera and a dead microphone) still resolves, which is
+          // the behaviour it has always had. That case connects a call
+          // with no microphone and is a separate gap - lwpCall's
+          // hasTracks check counts tracks of any kind.
+          if (!mediaStream.getTracks().some((track) => track.readyState == "live")) {
+            throw error;
+          }
+
           return mediaStream;
         });
+    })
+    .then((mediaStream) => {
+      // One owner of the field. _ensureMediaStream() can hand back a
+      // stream it did not persist - its recovery-failed path returns a
+      // throwaway - and this function then populates that object with
+      // real tracks, leaving the call working while _mediaStreamPromise
+      // still resolves the old empty stream, so mute and device
+      // switching silently stop working for the rest of the session.
+      // Writing back here means the field always resolves whatever
+      // stream actually holds the tracks, whichever route produced it.
+      this._mediaStreamPromise = Promise.resolve(mediaStream);
+
+      return mediaStream;
     });
   }
 
@@ -1737,8 +1962,13 @@ export default class extends lwpRenderer {
 
   _createCallStream(mediaStream, requestId) {
     if (!mediaStream) {
-      console.warn("[lwpMediaDevices] _createCallStream: received an undefined mediaStream; recovering with an empty one");
-      this._emit("mediaStreamPromise.recovered", this, { location: "_createCallStream" });
+      // Defensive only: both callers now guarantee a real MediaStream, and
+      // startStreams() rejects rather than passing one through with no live
+      // tracks. Deliberately emits nothing - the "recovered" event this used
+      // to fire said the opposite of what happened (an empty stream was
+      // fabricated, nothing was recovered) and carried a payload the other
+      // emitter of that event does not have.
+      console.warn("[lwpMediaDevices] _createCallStream: received an undefined mediaStream; substituting an empty one");
       mediaStream = new MediaStream();
     }
 

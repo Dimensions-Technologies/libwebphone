@@ -63,7 +63,7 @@ export default class {
         return sdp.replace(mLineRegex, (whole, pre, pts, body) => {
       // Map PT -> codec name/full
       const ptToName = {}, ptToFull = {};
-      body.replace(/a=rtpmap:(\d+)\s+([A-Za-z0-9\-]+)\/(\d+)(?:\/(\d+))?/g,
+      body.replace(/a=rtpmap:(\d+)\s+([A-Za-z0-9-]+)\/(\d+)(?:\/(\d+))?/g,
             (_, pt, name, rate, ch) => {
         const full = (name + '/' + rate + (ch ? ('/' + ch) : '')).toLowerCase();
         ptToName[pt] = name.toLowerCase();
@@ -1070,7 +1070,7 @@ export default class {
         element.setAttribute('webkit-playsinline', 'webkit-playsinline');
         element.setAttribute('playsinline', 'playsinline');
       } catch (error) {
-        this._emit("error", error);
+        this._emit("error", this, error);
       }
     }
 
@@ -1085,10 +1085,10 @@ export default class {
         // use - a try/catch alone leaves the latter unhandled.
         try {
           element.setSinkId(preferedDevice.id).catch((error) => {
-            this._emit("error", error);
+            this._emit("error", this, error);
           });
         } catch (error) {
-          this._emit("error", error);
+          this._emit("error", this, error);
         }
       }
     }
@@ -1240,10 +1240,10 @@ export default class {
             // the rejection.
             try {
               element.setSinkId(preferedDevice.id).catch((error) => {
-                this._emit("error", error);
+                this._emit("error", this, error);
               });
             } catch (error) {
-              this._emit("error", error);
+              this._emit("error", this, error);
             }
           }
         });

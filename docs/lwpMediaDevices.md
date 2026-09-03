@@ -232,6 +232,8 @@ Re-paint / update all render targets.
 | mediaDevices.audio.input.element  | [HTML Audio Element](https://developer.mozilla.org/en-US/docs/Web/HTML/Element/audio) | Emitted when the HTML audio element is created  |
 | mediaDevices.video.output.element | [HTML Video Element](https://developer.mozilla.org/en-US/docs/Web/HTML/Element/video) | Emitted when the HTML audio element is created  |
 | mediaDevices.getUserMedia.error   | error (exception)                                                                     | Emitted if getUserMedia() throws                |
+| mediaDevices.mediaStreamPromise.recovering |                                                                                       | Emitted when the shared input MediaStream is found to carry no live tracks and a fresh getUserMedia() is attempted |
+| mediaDevices.mediaStreamPromise.recovered |                                                                                        | Emitted when that attempt succeeds and the recovered stream is adopted as the shared one |
 | mediaDevices.ring.output.changed | preferedDevice                                                                        | Emitted when the ring output audio device is changed |
 | mediaDevices.ring.output.error   | error                                                                                  | Emitted when setSinkId() fails while switching the ring output device, whether it was called on the AudioContext or on the media element |
 | mediaDevices.ring.output.secondary.changed | preferedDevice                                                              | Emitted when the secondary ring output device is changed, including when it is set (or reset) back to `none` |
