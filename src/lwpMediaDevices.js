@@ -288,6 +288,66 @@ export default class extends lwpRenderer {
     });
   }
 
+  // Whether two audio output ids name the same speaker. Ids alone are not
+  // enough: browsers expose aliases ("default", "communications", and the
+  // empty string setSinkId spells the default device as) for an output that
+  // also appears under a concrete id of its own, and only the groupId ties
+  // an alias to the device it currently stands for.
+  //
+  // Which is as far as groupId is allowed to go here. It marks a physical
+  // *unit*, not an output: a Bluetooth headset can expose its stereo and
+  // hands-free outputs as two devices sharing one groupId, as can a
+  // multi-output HDMI adapter. Treating those as interchangeable would send
+  // audio to a different output than the one that was chosen - so two
+  // concrete ids that differ are always two different selections, and only a
+  // comparison where one side is an alias consults the groupId at all.
+  //
+  // (_isPrimaryRingDevice() matches on groupId alone. It can: there a false
+  // match only disables the secondary ringer, where here it would move audio
+  // onto the wrong speaker.)
+  //
+  // Falls back to comparing the ids where either can't be resolved: before
+  // enumeration, and for an id belonging to a device that has since gone.
+  isSameOutputDevice(deviceIdA, deviceIdB) {
+    const normalize = (deviceId) => {
+      return deviceId || "default";
+    };
+
+    const isAlias = (deviceId) => {
+      return deviceId == "default" || deviceId == "communications";
+    };
+
+    deviceIdA = normalize(deviceIdA);
+    deviceIdB = normalize(deviceIdB);
+
+    if (deviceIdA == deviceIdB) {
+      return true;
+    }
+
+    if (!isAlias(deviceIdA) && !isAlias(deviceIdB)) {
+      return false;
+    }
+
+    const available = this._availableDevices["audiooutput"];
+
+    if (!available) {
+      return false;
+    }
+
+    const deviceA = this._findAvailableDevice("audiooutput", deviceIdA);
+    const deviceB = this._findAvailableDevice("audiooutput", deviceIdB);
+
+    if (!deviceA || !deviceB) {
+      return false;
+    }
+
+    return !!(
+      deviceA.groupId &&
+      deviceB.groupId &&
+      deviceA.groupId == deviceB.groupId
+    );
+  }
+
   async changeDevice(deviceKind, deviceId) {
     const preferedDevice = this._findAvailableDevice(deviceKind, deviceId);
 

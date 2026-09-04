@@ -360,7 +360,7 @@ export default class extends lwpRenderer {
         three: [1477, 697],
         four: [1209, 770],
         five: [1336, 770],
-        six: [1477, 697],
+        six: [1477, 770],
         seven: [1209, 852],
         eight: [1336, 852],
         nine: [1477, 852],
@@ -531,109 +531,121 @@ export default class extends lwpRenderer {
         },
         one: {
           events: {
+            onpointerdown: (event) => {
+              this._dialElementOnPointer(event);
+            },
             onclick: (event) => {
-              const element = event.srcElement;
-              const value = element.dataset.value;
-              this.dial(this._valueToChar(value), this._valueToTone(value));
+              this._dialElementOnClick(event);
             },
           },
         },
         two: {
           events: {
+            onpointerdown: (event) => {
+              this._dialElementOnPointer(event);
+            },
             onclick: (event) => {
-              const element = event.srcElement;
-              const value = element.dataset.value;
-              this.dial(this._valueToChar(value), this._valueToTone(value));
+              this._dialElementOnClick(event);
             },
           },
         },
         three: {
           events: {
+            onpointerdown: (event) => {
+              this._dialElementOnPointer(event);
+            },
             onclick: (event) => {
-              const element = event.srcElement;
-              const value = element.dataset.value;
-              this.dial(this._valueToChar(value), this._valueToTone(value));
+              this._dialElementOnClick(event);
             },
           },
         },
         four: {
           events: {
+            onpointerdown: (event) => {
+              this._dialElementOnPointer(event);
+            },
             onclick: (event) => {
-              const element = event.srcElement;
-              const value = element.dataset.value;
-              this.dial(this._valueToChar(value), this._valueToTone(value));
+              this._dialElementOnClick(event);
             },
           },
         },
         five: {
           events: {
+            onpointerdown: (event) => {
+              this._dialElementOnPointer(event);
+            },
             onclick: (event) => {
-              const element = event.srcElement;
-              const value = element.dataset.value;
-              this.dial(this._valueToChar(value), this._valueToTone(value));
+              this._dialElementOnClick(event);
             },
           },
         },
         six: {
           events: {
+            onpointerdown: (event) => {
+              this._dialElementOnPointer(event);
+            },
             onclick: (event) => {
-              const element = event.srcElement;
-              const value = element.dataset.value;
-              this.dial(this._valueToChar(value), this._valueToTone(value));
+              this._dialElementOnClick(event);
             },
           },
         },
         seven: {
           events: {
+            onpointerdown: (event) => {
+              this._dialElementOnPointer(event);
+            },
             onclick: (event) => {
-              const element = event.srcElement;
-              const value = element.dataset.value;
-              this.dial(this._valueToChar(value), this._valueToTone(value));
+              this._dialElementOnClick(event);
             },
           },
         },
         eight: {
           events: {
+            onpointerdown: (event) => {
+              this._dialElementOnPointer(event);
+            },
             onclick: (event) => {
-              const element = event.srcElement;
-              const value = element.dataset.value;
-              this.dial(this._valueToChar(value), this._valueToTone(value));
+              this._dialElementOnClick(event);
             },
           },
         },
         nine: {
           events: {
+            onpointerdown: (event) => {
+              this._dialElementOnPointer(event);
+            },
             onclick: (event) => {
-              const element = event.srcElement;
-              const value = element.dataset.value;
-              this.dial(this._valueToChar(value), this._valueToTone(value));
+              this._dialElementOnClick(event);
             },
           },
         },
         astrisk: {
           events: {
+            onpointerdown: (event) => {
+              this._dialElementOnPointer(event);
+            },
             onclick: (event) => {
-              const element = event.srcElement;
-              const value = element.dataset.value;
-              this.dial(this._valueToChar(value), this._valueToTone(value));
+              this._dialElementOnClick(event);
             },
           },
         },
         zero: {
           events: {
+            onpointerdown: (event) => {
+              this._dialElementOnPointer(event);
+            },
             onclick: (event) => {
-              const element = event.srcElement;
-              const value = element.dataset.value;
-              this.dial(this._valueToChar(value), this._valueToTone(value));
+              this._dialElementOnClick(event);
             },
           },
         },
         pound: {
           events: {
+            onpointerdown: (event) => {
+              this._dialElementOnPointer(event);
+            },
             onclick: (event) => {
-              const element = event.srcElement;
-              const value = element.dataset.value;
-              this.dial(this._valueToChar(value), this._valueToTone(value));
+              this._dialElementOnClick(event);
             },
           },
         },
@@ -785,6 +797,57 @@ export default class extends lwpRenderer {
   }
 
   /** Helper functions */
+
+  // Shared by the digit buttons' two bindings below.
+  //
+  // currentTarget rather than target: the default template's buttons carry
+  // their text directly, but a host template is free to wrap it, and a press
+  // that lands on a child element would otherwise read dataset off the child.
+  _dialElement(event) {
+    const element = event.currentTarget || event.srcElement;
+
+    if (!element || !element.dataset) {
+      return;
+    }
+
+    const value = element.dataset.value;
+
+    this.dial(this._valueToChar(value), this._valueToTone(value));
+  }
+
+  // Digits are dialled on pointerdown rather than on click so the keypress
+  // tone starts when the key goes down, the way a real keypad behaves.
+  // Waiting for the release adds however long the button is held - typically
+  // 60-150ms with a mouse, more with a finger - to the delay before the tone,
+  // and because it varies with the press it reads as an unsteady one.
+  _dialElementOnPointer(event) {
+    // pointerdown fires for every button and every finger, where the click it
+    // replaces only ever fired for a primary activation. Without this a
+    // right-click or a middle-click on a key would dial it - and send the
+    // DTMF into a live call - and a second finger landing anywhere on the pad
+    // during a multi-touch would dial a second digit.
+    if (event.button !== 0 || event.isPrimary === false) {
+      return;
+    }
+
+    this._dialElement(event);
+  }
+
+  // click stays bound for keyboard and assistive activation, which produce no
+  // pointer events at all. Those arrive with a detail (the click count) of 0,
+  // which is what separates them from the click that follows every pointer
+  // press - that one has already been answered on pointerdown, and dialling
+  // it again would double every digit.
+  //
+  // Where PointerEvent is missing altogether nothing fired on pointerdown, so
+  // click has to go on carrying the whole job.
+  _dialElementOnClick(event) {
+    if ("PointerEvent" in window && event.detail !== 0) {
+      return;
+    }
+
+    this._dialElement(event);
+  }
 
   _valueToChar(value) {
     return this._charDictionary()[value];

@@ -33,9 +33,11 @@ export default class extends lwpRenderer {
     this._emit = this._libwebphone._audioContextEvent;
     this._initProperties(config);
     this._initInternationalization(config.i18n || {});
+    // Before _initOutputAudio(): that builds the tones graph, and which
+    // context the graph belongs on is state this sets up.
+    this._initTonesAudio();
     this._initOutputAudio();
     this._initRingAudio();
-    this._initTonesAudio();
     this._initPreviewAudio();
     this._initRemoteAudio();
     this._initEventBindings();
@@ -47,6 +49,18 @@ export default class extends lwpRenderer {
   // Resolves to whether the context is actually running; callers that just
   // want to nudge it awake can ignore the return value.
   startAudioContext() {
+    // Nudged alongside, not awaited: whether the phone can play audio is
+    // still the shared context's answer to give, and the tones channel has
+    // the element route to fall back on.
+    if (this._tonesAudio && this._tonesAudio.dedicated) {
+      // Reconsidered after the resume, not just started: a suspended context
+      // cannot be the direct route (see _tonesRouteDirect), so waking one is
+      // what puts the channel back on it.
+      this._resumeContext(this._tonesAudio.context).then(() => {
+        this._updateTonesRouting();
+      });
+    }
+
     return this._resumeAudioContext().then((running) => {
       // Only announce "started" once audio can genuinely play - _started is a
       // one-shot latch, so a listener that ran while output was still blocked
@@ -205,11 +219,21 @@ export default class extends lwpRenderer {
       this._emit("channel." + channel + ".volume", this, volume);
     }
 
+    if (channel == "master") {
+      this._syncTonesMasterVolume();
+    }
+
     if (gainNode) {
       // Ramped, not assigned: writing .value steps the gain in a single
       // sample, which clicks against anything already playing - reachable by
       // dragging a volume slider mid-ring.
-      const context = this._audioContext;
+      //
+      // Against the node's own clock, not the shared context's: the tones
+      // channel can be running on a context of its own, whose currentTime is
+      // unrelated (it starts at zero when that context is created). Ramping a
+      // promoted tonesGain against the shared clock would schedule the change
+      // as far into its future as the two contexts' ages differ.
+      const context = gainNode.context;
 
       if (context.state == "running") {
         gainNode.gain.setTargetAtTime(volume, context.currentTime, 0.015);
@@ -228,31 +252,90 @@ export default class extends lwpRenderer {
 
     this.startAudioContext();
 
-    const duration = this._config.channels.tones.duration;
-    const sampleRate = this._tonesAudio.context.sampleRate;
-    const buffer = this._shimCreateBuffer(
-      this._tonesAudio.context,
-      tones.length,
-      sampleRate,
-      sampleRate
-    );
+    // Taken from the node this connects to rather than from _tonesAudio
+    // directly: nodes can only be connected within one context, and a
+    // promotion replaces both at once (see _ensureTonesContext).
+    const gainNode = this._getOutputGainNode("tones");
+    const context = gainNode.context;
+    const bufferSource = this._shimCreateBufferSource(context);
 
-    for (let index = 0; index < tones.length; index++) {
-      const channel = buffer.getChannelData(index);
-      for (let i = 0; i < duration * sampleRate; i++) {
-        channel[i] = Math.sin(2 * Math.PI * tones[index] * (i / sampleRate));
-      }
+    bufferSource.buffer = this._toneBuffer(context, tones);
+    bufferSource.connect(gainNode);
+
+    // No cleanup timer: a buffer source ends itself at the end of its buffer
+    // and is single-use either way, so the old one only ever fired long after
+    // there was anything left to stop.
+    bufferSource.onended = () => {
+      bufferSource.disconnect();
+    };
+
+    bufferSource.start();
+  }
+
+  // The rendered tone for a set of frequencies, built once and kept.
+  //
+  // There are twelve keys on a dialpad and the tone for each is identical
+  // every time, but this used to be re-rendered on every keypress: a
+  // one-second buffer allocated and a sine evaluated per sample, on the
+  // thread the UI is on. The allocation churn alone is worth avoiding on
+  // something that happens as fast as someone can type.
+  //
+  // Keyed by everything that changes the result, so a duration change or a
+  // move onto a context with a different sample rate simply builds a new one.
+  _toneBuffer(context, tones) {
+    const duration = this._config.channels.tones.duration;
+    const sampleRate = context.sampleRate;
+    const key = tones.join("+") + "@" + sampleRate + "/" + duration;
+
+    if (this._tonesAudio.buffers[key]) {
+      return this._tonesAudio.buffers[key];
     }
 
-    const bufferSource = this._shimCreateBufferSource(this._tonesAudio.context);
-    bufferSource.buffer = buffer;
-    bufferSource.connect(this._getOutputGainNode("tones"));
-    bufferSource.start();
+    const length = Math.max(1, Math.round(duration * sampleRate));
 
-    setTimeout(() => {
-      bufferSource.disconnect();
-      bufferSource.stop();
-    }, (duration + 0.5) * 1000);
+    // One channel, not one per frequency. DTMF is both tones sounding
+    // together; a channel each puts one in either ear on headphones, which is
+    // not what a keypad sounds like - it only summed to the right thing by
+    // the accident of playing out of a single speaker.
+    const buffer = this._shimCreateBuffer(context, 1, length, sampleRate);
+    const channel = buffer.getChannelData(0);
+
+    // Scaled by how many are being summed so a pair cannot run past full
+    // scale and clip. How loud the channel is stays tonesGain's business.
+    const amplitude = 1 / tones.length;
+
+    // A tone that simply stops is a step to silence from wherever in the
+    // cycle it happened to be, and that step is an audible click on every
+    // keypress. A few milliseconds either end removes it - short enough to
+    // leave the attack sounding immediate.
+    const fade = Math.min(
+      Math.round(this._config.channels.tones.fade * sampleRate),
+      Math.floor(length / 2)
+    );
+
+    for (let i = 0; i < length; i++) {
+      let sample = 0;
+
+      for (let index = 0; index < tones.length; index++) {
+        sample += Math.sin(2 * Math.PI * tones[index] * (i / sampleRate));
+      }
+
+      let envelope = 1;
+
+      if (fade > 0) {
+        if (i < fade) {
+          envelope = i / fade;
+        } else if (i >= length - fade) {
+          envelope = (length - 1 - i) / fade;
+        }
+      }
+
+      channel[i] = sample * amplitude * envelope;
+    }
+
+    this._tonesAudio.buffers[key] = buffer;
+
+    return buffer;
   }
 
   // `ringtoneId` overrides the selected ringtone for this call - how an
@@ -498,7 +581,13 @@ export default class extends lwpRenderer {
 
     this.startAudioContext();
 
-    return this._resumeAudioContext()
+    // As with the call waiting beep: captured once, so the context resumed
+    // is the context the beeps are scheduled on even if a promotion lands
+    // while the resume is settling.
+    const gainNode = this._outputAudio.autoAnswerWarningGain;
+    const context = gainNode.context;
+
+    return this._resumeContext(context)
       .then((running) => {
         if (!running) {
           this._emit(
@@ -511,7 +600,10 @@ export default class extends lwpRenderer {
           return false;
         }
 
-        const context = this._audioContext;
+        // As in _playCallWaitingBeep(): the resume may be what made the
+        // direct leg usable, and the routing decision is cached.
+        this._updateTonesRouting();
+
         // Read after the resume settled, not before it - the clock has
         // moved on while it was suspended.
         const start = context.currentTime;
@@ -529,7 +621,7 @@ export default class extends lwpRenderer {
           // them would be plainly audible at this spacing, and the whole
           // sequence is only a few hundred milliseconds long.
           this._scheduleAutoAnswerWarningBeep(
-            context,
+            gainNode,
             config,
             start + index * step,
             duration
@@ -557,7 +649,10 @@ export default class extends lwpRenderer {
       });
   }
 
-  _scheduleAutoAnswerWarningBeep(context, config, when, duration) {
+  // Takes the node to play into rather than a context, so the oscillator can
+  // only ever be created on the context that node belongs to.
+  _scheduleAutoAnswerWarningBeep(gainNode, config, when, duration) {
+    const context = gainNode.context;
     const oscillator = this._shimCreateOscillator(context);
     const envelope = this._shimCreateGain(context);
 
@@ -573,7 +668,7 @@ export default class extends lwpRenderer {
     envelope.gain.linearRampToValueAtTime(0, when + duration);
 
     oscillator.connect(envelope);
-    envelope.connect(this._outputAudio.autoAnswerWarningGain);
+    envelope.connect(gainNode);
 
     oscillator.onended = () => {
       oscillator.disconnect();
@@ -979,6 +1074,12 @@ export default class extends lwpRenderer {
 
     const sinkId = this._normalizeSinkId(deviceId);
 
+    // _outputAudio.sinkId only catches up once setSinkId resolves, so until
+    // then the tones route would be decided against a stale value - see
+    // _ensureTonesContext(), which holds off while this is set rather than
+    // promoting onto a split that is about to close.
+    this._outputAudio.sinkChanging = true;
+
     return Promise.resolve()
       .then(() => {
         return this._audioContext.setSinkId(sinkId);
@@ -986,9 +1087,21 @@ export default class extends lwpRenderer {
       .then(() => {
         this._outputAudio.sinkId = sinkId;
 
+        // The tones route is chosen by comparing this against the speaker
+        // element's sink, so it has to be reconsidered whenever either moves.
+        this._updateTonesRouting();
+
         this._emit("sink.changed", this, this.getOutputSinkInfo());
 
         return true;
+      })
+      .finally(() => {
+        this._outputAudio.sinkChanging = false;
+
+        // Again with the guard lifted: the call above ran while it still
+        // applied, so any promotion it needed was deferred to here. Also
+        // covers the rejection path, where the first call never happened.
+        this._updateTonesRouting();
       });
   }
 
@@ -1039,6 +1152,24 @@ export default class extends lwpRenderer {
       secondary: {
         enabled: this.isSecondaryRingOutputEnabled(),
         deviceId: this._getMediaElementSinkId("ringoutput2"),
+      },
+      // Not ring output, but the other thing that leaves this context, and
+      // the one worth checking when keypress feedback feels late: "element"
+      // is the route that carries the extra buffering (see
+      // _updateTonesRouting), "direct" the one that doesn't.
+      tones: {
+        route: this._outputAudio.tonesUsingDirect ? "direct" : "element",
+        // Whether the channel has a context (and so a sink) of its own yet -
+        // see _ensureTonesContext().
+        dedicated: this._tonesAudio.dedicated,
+        deviceId: this._tonesAudio.dedicated
+          ? this._tonesAudio.sinkId
+          : this._outputAudio.tonesUsingDirect
+          ? this.usesContextSink()
+            ? this._outputAudio.sinkId
+            : ""
+          : this._getMediaElementSinkId("audiooutput"),
+        sampleRate: this._tonesAudio.context.sampleRate,
       },
     };
   }
@@ -1255,6 +1386,9 @@ export default class extends lwpRenderer {
         },
         tones: {
           duration: 0.15,
+          // Attack and release, in seconds. Without it a tone ends on a step
+          // to silence and clicks - see _toneBuffer().
+          fade: 0.005,
           show: true,
           volume: 0.15,
           connectToMaster: true,
@@ -1353,11 +1487,6 @@ export default class extends lwpRenderer {
       this._outputAudio.ringerGain.connect(this._outputAudio.masterGain);
     }
 
-    this._outputAudio.tonesGain = this._shimCreateGain(
-      this._outputAudio.context
-    );
-    this._outputAudio.tonesGain.gain.value = this._config.channels.tones.volume;
-
     this._outputAudio.remoteGain = this._shimCreateGain(
       this._outputAudio.context
     );
@@ -1398,6 +1527,10 @@ export default class extends lwpRenderer {
 
     this._outputAudio.sinkId = "";
 
+    // Whether a setSinkId on the shared context is still in flight, and so
+    // whether `sinkId` above can be trusted - see _ensureTonesContext().
+    this._outputAudio.sinkChanging = false;
+
     // Created in both modes: getDestinationStream() is public API a host app
     // may be tapping. In context-sink mode nothing plays it, so it is only a
     // passive tap and can't double up on what reaches the speakers.
@@ -1405,43 +1538,12 @@ export default class extends lwpRenderer {
       this._shimCreateMediaStreamDestination(this._outputAudio.context);
     this._outputAudio.masterGain.connect(this._outputAudio.destinationStream);
 
-    // Tones get their own stream to the audiooutput element (speaker), like
-    // call audio, and stay there in both modes: a context has one sink, and
-    // these go to the speaker device rather than the ring device. Detuning
-    // synthesised keypress feedback is of no consequence.
-    this._outputAudio.tonesDestinationStream =
-      this._shimCreateMediaStreamDestination(this._outputAudio.context);
-    this._outputAudio.tonesGain.connect(
-      this._outputAudio.tonesDestinationStream
-    );
-
-    // The call waiting beep goes to the speaker, not the ring output: it
-    // announces a second call to someone who is already on one, so it belongs
-    // where that conversation is - see _playCallWaitingBeep(). Its own node on
-    // the tones stream rather than tonesGain itself, so the DTMF feedback
-    // volume (0.15 by default) doesn't scale it, or silence it outright when a
-    // user turns keypress feedback down.
-    this._outputAudio.callWaitingGain = this._shimCreateGain(
-      this._outputAudio.context
-    );
-    this._outputAudio.callWaitingGain.gain.value =
-      this._config.channels.ringer.callWaiting.volume;
-    this._outputAudio.callWaitingGain.connect(
-      this._outputAudio.tonesDestinationStream
-    );
-
-    // The auto-answer warning tone, on the same stream and for the same
-    // reasons as the call waiting beep above, but on a node of its own so
-    // the two levels stay independent - this one has to be heard over
-    // nothing in particular, that one has to sit under a live call.
-    this._outputAudio.autoAnswerWarningGain = this._shimCreateGain(
-      this._outputAudio.context
-    );
-    this._outputAudio.autoAnswerWarningGain.gain.value =
-      this._config.channels.ringer.autoAnswerWarning.volume;
-    this._outputAudio.autoAnswerWarningGain.connect(
-      this._outputAudio.tonesDestinationStream
-    );
+    // Everything on the tones channel is built by _buildTonesGraph(), because
+    // it can be built again: the channel is promoted onto a context of its
+    // own when the speaker and the ring output split (see
+    // _ensureTonesContext), and nodes belong to the context that created
+    // them.
+    this._buildTonesGraph(this._outputAudio.context);
 
     const ringerElement = mediaDevices
       ? mediaDevices.getMediaElement("ringoutput")
@@ -1490,13 +1592,8 @@ export default class extends lwpRenderer {
     );
 
     if (mediaDevices) {
-      const speakerElement = mediaDevices.getMediaElement("audiooutput");
-      if (speakerElement) {
-        speakerElement.srcObject =
-          this._outputAudio.tonesDestinationStream.stream;
-        speakerElement.volume = this._config.channels.master.volume;
-      }
-
+      // The audiooutput element is wired up in _buildTonesGraph(), with the
+      // stream it carries.
       const secondaryRingerElement =
         mediaDevices.getMediaElement("ringoutput2");
       if (secondaryRingerElement) {
@@ -1504,6 +1601,137 @@ export default class extends lwpRenderer {
           this._outputAudio.secondaryRingDestinationStream.stream;
       }
     }
+
+    // Last: it reads the sinks both routes above have settled on.
+    this._updateTonesRouting();
+  }
+
+  // Severs the previous tones graph, if there is one. A no-op on the first
+  // build. Sources still running on it (an oscillator mid-beep, a tone buffer
+  // mid-play) are left to end and disconnect themselves as they always would
+  // - this only takes away what they were playing into, which by then reaches
+  // nothing anyway. See _buildTonesGraph().
+  _teardownTonesGraph() {
+    [
+      this._outputAudio.tonesGain,
+      this._outputAudio.callWaitingGain,
+      this._outputAudio.autoAnswerWarningGain,
+      this._outputAudio.tonesBus,
+      this._outputAudio.tonesDirectGain,
+      this._outputAudio.tonesElementGain,
+    ].forEach((node) => {
+      if (node) {
+        node.disconnect();
+      }
+    });
+  }
+
+  // The tones channel, built as a unit so it can be built again on a context
+  // of its own - see _ensureTonesContext(). Nodes belong to the context that
+  // created them, so a promotion is a rebuild, not a move.
+  //
+  // A rebuild takes the previous graph down with it, because by then there is
+  // nothing left on it worth keeping. A rebuild only happens on a promotion,
+  // and a promotion only fires while _tonesRouteDirect() is false - so the
+  // old graph's direct leg is at zero by construction, and its element leg is
+  // cut the moment the repoint below moves the element onto the new stream.
+  // Both legs are silent either way; leaving them connected would strand a
+  // MediaStreamAudioDestinationNode being fed at unity on the shared context,
+  // producing a stream nothing consumes.
+  _buildTonesGraph(context) {
+    this._teardownTonesGraph();
+
+    this._outputAudio.tonesGain = this._shimCreateGain(context);
+    this._outputAudio.tonesGain.gain.value = this._config.channels.tones.volume;
+
+    // Tones can reach the speaker by either of two routes, and every source
+    // on this channel shares the choice - hence the bus rather than three
+    // sets of connections.
+    //
+    // The MediaStream -> <audio> route exists because a context has one sink,
+    // and these go to the speaker device rather than the ring device. But
+    // that hand-off carries a buffering stage of its own, outside the
+    // context's latency budget and well over the ~150ms these sounds last:
+    // enough to make a keypress tone feel detached from the keypress, and it
+    // grows across a session after a glitch rather than settling back.
+    //
+    // So it is only taken when it earns its keep - when the tones cannot
+    // reach the speaker device by playing straight out of their own context.
+    // See _updateTonesRouting().
+    this._outputAudio.tonesDestinationStream =
+      this._shimCreateMediaStreamDestination(context);
+
+    // Repointed on every rebuild, not just the first: the element route has
+    // to stay usable on whichever graph is live, because a promoted context
+    // whose setSinkId later fails falls back to it.
+    const mediaDevices = this._libwebphone.getMediaDevices();
+    const speakerElement = mediaDevices
+      ? mediaDevices.getMediaElement("audiooutput")
+      : null;
+
+    if (speakerElement) {
+      speakerElement.srcObject = this._outputAudio.tonesDestinationStream.stream;
+      speakerElement.volume = this._tonesMasterVolume();
+
+      // A repoint can leave the element paused. Only on a rebuild, though:
+      // at construction there has been no gesture to play it with, and
+      // lwpMediaDevices' _startMediaElements() is what covers that - trying
+      // here would only emit an error every startup. `dedicated` is set
+      // before the rebuild, so it distinguishes the two.
+      if (this._tonesAudio.dedicated && speakerElement.paused) {
+        Promise.resolve()
+          .then(() => {
+            return speakerElement.play();
+          })
+          .catch((error) => {
+            this._emit("tones.element.play.error", this, error);
+          });
+      }
+    }
+
+    this._outputAudio.tonesBus = this._shimCreateGain(context);
+
+    // Exactly one leg is audible at a time, gated by gain rather than by
+    // connect/disconnect so a route change mid-tone can be ramped instead of
+    // cutting. Both start silent; _updateTonesRouting() opens one.
+    this._outputAudio.tonesDirectGain = this._shimCreateGain(context);
+    this._outputAudio.tonesDirectGain.gain.value = 0;
+    this._outputAudio.tonesDirectGain.connect(context.destination);
+
+    this._outputAudio.tonesElementGain = this._shimCreateGain(context);
+    this._outputAudio.tonesElementGain.gain.value = 0;
+    this._outputAudio.tonesElementGain.connect(
+      this._outputAudio.tonesDestinationStream
+    );
+
+    this._outputAudio.tonesBus.connect(this._outputAudio.tonesDirectGain);
+    this._outputAudio.tonesBus.connect(this._outputAudio.tonesElementGain);
+
+    // Null rather than false: "no route decided yet", so the next
+    // _updateTonesRouting() always applies one.
+    this._outputAudio.tonesUsingDirect = null;
+
+    this._outputAudio.tonesGain.connect(this._outputAudio.tonesBus);
+
+    // The call waiting beep goes to the speaker, not the ring output: it
+    // announces a second call to someone who is already on one, so it belongs
+    // where that conversation is - see _playCallWaitingBeep(). Its own node on
+    // the tones bus rather than tonesGain itself, so the DTMF feedback volume
+    // (0.15 by default) doesn't scale it, or silence it outright when a user
+    // turns keypress feedback down.
+    this._outputAudio.callWaitingGain = this._shimCreateGain(context);
+    this._outputAudio.callWaitingGain.gain.value =
+      this._config.channels.ringer.callWaiting.volume;
+    this._outputAudio.callWaitingGain.connect(this._outputAudio.tonesBus);
+
+    // The auto-answer warning tone, on the same bus and for the same
+    // reasons as the call waiting beep above, but on a node of its own so
+    // the two levels stay independent - this one has to be heard over
+    // nothing in particular, that one has to sit under a live call.
+    this._outputAudio.autoAnswerWarningGain = this._shimCreateGain(context);
+    this._outputAudio.autoAnswerWarningGain.gain.value =
+      this._config.channels.ringer.autoAnswerWarning.volume;
+    this._outputAudio.autoAnswerWarningGain.connect(this._outputAudio.tonesBus);
   }
 
   _initRingAudio() {
@@ -1563,7 +1791,28 @@ export default class extends lwpRenderer {
   _initTonesAudio() {
     this._tonesAudio = {};
 
+    // Shared with everything else to begin with, and promoted to a context of
+    // its own if the speaker and the ring output turn out to be different
+    // devices - see _ensureTonesContext().
     this._tonesAudio.context = this._audioContext;
+
+    this._tonesAudio.dedicated = false;
+
+    // A promotion is asynchronous (the sink has to be accepted before the
+    // channel is moved onto it), so tones during one keep using the shared
+    // context rather than queueing behind it.
+    this._tonesAudio.promoting = false;
+
+    // Set when a promotion has been tried and failed, to stop every
+    // subsequent keypress retrying it. Cleared when the speaker selection
+    // changes, since that is the thing most likely to have been wrong.
+    this._tonesAudio.promotionFailed = false;
+
+    this._tonesAudio.sinkId = null;
+
+    // Rendered tones, keyed by frequencies, sample rate and duration - see
+    // _toneBuffer(). A dialpad's worth is a few tens of kilobytes.
+    this._tonesAudio.buffers = {};
   }
 
   _initRemoteAudio() {
@@ -1699,6 +1948,24 @@ export default class extends lwpRenderer {
     );
     this._libwebphone.on("mediaDevices.devices.loaded", () => {
       this._syncRingOutputSink();
+
+      // Also here, not just on a sink change: until the devices are
+      // enumerated _tonesRouteDirect() has no groupIds to match aliases with
+      // and can only compare ids, so its answer is worth revisiting once
+      // they arrive.
+      this._updateTonesRouting();
+    });
+
+    // Emitted once the speaker element's setSinkId has settled, so the sink
+    // read here is the one actually in force - see _tonesRouteDirect().
+    this._libwebphone.on("mediaDevices.audio.output.changed", () => {
+      // A promotion that failed against the previous device deserves another
+      // go against this one.
+      this._tonesAudio.promotionFailed = false;
+
+      this._syncTonesContextSink().then(() => {
+        this._updateTonesRouting();
+      });
     });
 
     this._libwebphone.on("mediaDevices.streams.stopped", () => {
@@ -2477,7 +2744,15 @@ export default class extends lwpRenderer {
   // mean the phone silently never rings. Raced against a short timeout and
   // decided on the context's actual state instead.
   _resumeAudioContext(timeoutMs = 150) {
-    const context = this._audioContext;
+    return this._resumeContext(this._audioContext, timeoutMs);
+  }
+
+  // The same, for whichever context is asked for - the tones channel can be
+  // running on one of its own (see _ensureTonesContext).
+  _resumeContext(context, timeoutMs = 150) {
+    if (!context) {
+      return Promise.resolve(false);
+    }
 
     if (context.state === "running") {
       return Promise.resolve(true);
@@ -2525,6 +2800,319 @@ export default class extends lwpRenderer {
 
   _getRingOutputElementSinkId() {
     return this._getMediaElementSinkId("ringoutput");
+  }
+
+  // Gives the tones channel a context of its own, so that it can have a sink
+  // of its own.
+  //
+  // A context has exactly one sink, and in context-sink mode ring output has
+  // already claimed the shared one. That leaves the tones no way to reach a
+  // speaker device that differs from the ring device except the MediaStream
+  // -> <audio> hand-off and its buffering, which is precisely what makes a
+  // keypress tone feel late. A second context sidesteps the conflict: ring
+  // output keeps the sink it has, and the tones get one pointed at the
+  // speaker.
+  //
+  // Created only when the route would otherwise be the slow one, rather than
+  // at init: where the speaker and the ring output land on the same device
+  // the shared context already reaches the speaker directly, and a second one
+  // would be a hardware output stream held open for nothing. Most users never
+  // split the two, and never create this at all.
+  //
+  // Called from _updateTonesRouting(), so it happens as soon as the split is
+  // known - usually as the speaker is selected, which carries the user
+  // activation a new context needs to start running rather than suspended.
+  // Where it doesn't (a split restored from config before anyone has touched
+  // the page) the context starts suspended, _tonesRouteDirect() keeps the
+  // channel on the element route until startAudioContext() has woken it, and
+  // the cost is one late tone rather than a silent one.
+  _ensureTonesContext() {
+    if (
+      this._tonesAudio.dedicated ||
+      this._tonesAudio.promoting ||
+      this._tonesAudio.promotionFailed
+    ) {
+      return;
+    }
+
+    // Without AudioContext.setSinkId a second context could not be pointed at
+    // the speaker either, so it would buy nothing over the element route.
+    if (!this._outputAudio.usingContextSink) {
+      return;
+    }
+
+    // A ring output sink change in flight has not reached _outputAudio.sinkId
+    // yet, so the split that got us here may not be a real one - at startup
+    // the ring device and the speaker are routinely applied a tick apart.
+    // Promoting on that would open a context for the life of the page that
+    // nothing ever needed. setRingOutputSinkId() re-runs the routing once it
+    // settles.
+    if (this._outputAudio.sinkChanging) {
+      return;
+    }
+
+    let context;
+
+    try {
+      context = this._shimAudioContext();
+    } catch (error) {
+      this._tonesAudio.promotionFailed = true;
+
+      this._emit("tones.context.error", this, error);
+
+      return;
+    }
+
+    this._tonesAudio.promoting = true;
+
+    const sinkId = this._speakerSinkId();
+
+    // The sink is claimed before the channel is moved onto the context, not
+    // after: a context that cannot be pointed at the speaker would play the
+    // tones out of the wrong device, which is worse than playing them late.
+    Promise.resolve()
+      .then(() => {
+        return this._resumeContext(context);
+      })
+      .then(() => {
+        return context.setSinkId(sinkId);
+      })
+      .then(
+        () => {
+          this._tonesAudio.context = context;
+          this._tonesAudio.sinkId = sinkId;
+          this._tonesAudio.dedicated = true;
+
+          this._buildTonesGraph(context);
+          this._updateTonesRouting();
+
+          // The sink was chosen before the resume and the setSinkId above,
+          // and a speaker change landing in between is dropped by both
+          // guards - _syncTonesContextSink() early-returns while `dedicated`
+          // is still false, and _ensureTonesContext() while `promoting` is
+          // true. So the selection is checked again here, now that neither
+          // guard applies. A no-op unless it actually moved.
+          this._syncTonesContextSink();
+
+          this._emit("tones.context.created", this, sinkId);
+        },
+        // A rejection handler on this .then rather than a .catch after it, so
+        // that it covers only the resume and the setSinkId above. A .catch
+        // would also cover the handler beside it - and that one has already
+        // adopted the context, so a host listener throwing out of the
+        // "created" event would close the live tones context and latch
+        // promotionFailed, leaving keypress tones, the call waiting beep and
+        // the auto-answer warning permanently silent.
+        (error) => {
+          this._tonesAudio.promotionFailed = true;
+
+          this._emit("tones.context.error", this, error);
+
+          // Hand the output stream back rather than leaving a context open
+          // that nothing is going to play through.
+          if (typeof context.close == "function") {
+            context.close().catch(() => {});
+          }
+        }
+      )
+      // Whatever the adoption handler above may have thrown. Reported and
+      // dropped: the context is adopted and working either way, and there is
+      // nothing here to undo.
+      .catch((error) => {
+        this._emit("tones.context.error", this, error);
+      })
+      .finally(() => {
+        this._tonesAudio.promoting = false;
+      });
+  }
+
+  // Where the speaker actually is, which is what the tones have to follow.
+  // The element's sink rather than the configured preference: a selection the
+  // browser refused leaves the speaker on the default device, and sending the
+  // tones somewhere the rest of the speaker audio is not would be worse than
+  // any delay.
+  _speakerSinkId() {
+    return this._normalizeSinkId(this._getMediaElementSinkId("audiooutput"));
+  }
+
+  // Keeps a promoted tones context pointed at the speaker as the selection
+  // moves. On failure the channel falls back to the element route rather than
+  // going on playing out of a device the speaker is no longer on.
+  _syncTonesContextSink() {
+    if (!this._tonesAudio.dedicated) {
+      return Promise.resolve(false);
+    }
+
+    const context = this._tonesAudio.context;
+    const sinkId = this._speakerSinkId();
+
+    if (sinkId == this._tonesAudio.sinkId) {
+      return Promise.resolve(true);
+    }
+
+    return Promise.resolve()
+      .then(() => {
+        return context.setSinkId(sinkId);
+      })
+      .then(() => {
+        this._tonesAudio.sinkId = sinkId;
+
+        return true;
+      })
+      .catch((error) => {
+        // The context is still on the old device, so the direct route no
+        // longer reaches the speaker - _tonesRouteDirect() reads this.
+        this._tonesAudio.sinkId = null;
+
+        this._updateTonesRouting();
+
+        this._emit("tones.sink.error", this, error);
+
+        return false;
+      });
+  }
+
+  // Whether the tones channel can skip the MediaStream -> <audio> hand-off
+  // and play straight out of the context. It can whenever both routes would
+  // land on the same speaker anyway, which is the usual case - a device has
+  // to have been picked for the speaker, and picked differently from where
+  // context.destination already plays, before the element earns its latency.
+  //
+  // Compares the sinks actually in force, not the configured preferences: a
+  // selection the browser refused (or never had setSinkId to apply) leaves
+  // the element on the default device, and that is what has to be matched.
+  //
+  // The comparison goes through lwpMediaDevices rather than matching ids
+  // directly, because "default", "communications" and a concrete id can all
+  // name one speaker - and a ring output left on the default alias while the
+  // speaker was pointed at that same device by its own id is a pairing a
+  // plain id match would send down the slow route for nothing.
+  _tonesRouteDirect() {
+    // A promoted tones context has a sink of its own, so playing straight out
+    // of it always reaches the speaker - whatever ring output has done with
+    // the shared context's sink. A null sinkId means a setSinkId came unstuck
+    // and the context is on some other device, which the element route has to
+    // cover until the selection moves again.
+    if (this._tonesAudio.dedicated) {
+      return (
+        this._tonesAudio.sinkId !== null &&
+        this._tonesAudio.context.state === "running"
+      );
+    }
+
+    // Where context.destination plays out: the device set on the context in
+    // context-sink mode, the browser's default in element mode (where the
+    // context's sink is never set at all and masterGain leaves by a stream).
+    const contextSinkId = this.usesContextSink()
+      ? this._normalizeSinkId(this._outputAudio.sinkId)
+      : "";
+    const elementSinkId = this._normalizeSinkId(
+      this._getMediaElementSinkId("audiooutput")
+    );
+
+    if (contextSinkId == elementSinkId) {
+      return true;
+    }
+
+    const mediaDevices = this._libwebphone.getMediaDevices();
+
+    return !!(
+      mediaDevices &&
+      mediaDevices.isSameOutputDevice(contextSinkId, elementSinkId)
+    );
+  }
+
+  // Opens whichever of the two tone routes is right for the sinks currently
+  // in force and silences the other. Cheap and idempotent - called wherever
+  // either sink can have moved.
+  _updateTonesRouting() {
+    if (!this._outputAudio || !this._outputAudio.tonesBus) {
+      return;
+    }
+
+    const direct = this._tonesRouteDirect();
+
+    // The route being the slow one is the whole reason a context of its own
+    // exists, so this is where it gets created - not on a keypress, which was
+    // only ever standing in for this condition.
+    //
+    // Above the early return below, not after it: a promotion that failed
+    // against a previous device is retried from here when the selection
+    // moves, and the route it would land on has not changed in the meantime.
+    // _ensureTonesContext() is a no-op once one exists, is in flight, or has
+    // failed against this selection, so a false route cannot spin here.
+    if (!direct) {
+      this._ensureTonesContext();
+    }
+
+    if (this._outputAudio.tonesUsingDirect === direct) {
+      return;
+    }
+
+    this._outputAudio.tonesUsingDirect = direct;
+
+    // The element route applies the master level itself, through the
+    // element's own volume - so the direct leg has to stand in for it, or
+    // changing route would change how loud keypress feedback is.
+    this._setToneRouteGain(
+      this._outputAudio.tonesDirectGain,
+      direct ? this._tonesMasterVolume() : 0
+    );
+    this._setToneRouteGain(this._outputAudio.tonesElementGain, direct ? 0 : 1);
+
+    this._emit("tones.route.changed", this, direct ? "direct" : "element");
+  }
+
+  // Ramped rather than assigned, for the same reason changeVolume() ramps: a
+  // route can be switched while a tone is sounding, and a single-sample step
+  // would click.
+  _setToneRouteGain(gainNode, volume) {
+    if (!gainNode) {
+      return;
+    }
+
+    // The node's own context, not the shared one: the tones channel can be
+    // running on a context of its own, and its clock is the one these ramps
+    // are scheduled against.
+    const context = gainNode.context;
+
+    if (context.state == "running") {
+      gainNode.gain.setTargetAtTime(volume, context.currentTime, 0.015);
+    } else {
+      gainNode.gain.value = volume;
+    }
+  }
+
+  // The tones channel never passes through masterGain (it has a route to the
+  // speaker of its own), so the master level reaches it only by being applied
+  // by hand - to the element on one route, to the direct leg's gain on the
+  // other. Without this a mid-session master change moves everything except
+  // keypress feedback, the call waiting beep and the auto-answer warning.
+  // The master level as it applies to the tones channel. The channel has its
+  // own route to the speaker rather than passing through masterGain, so
+  // `connectToMaster` is honoured here instead of by a connection - the same
+  // stand-in _secondaryRingVolume() makes for the secondary ring output.
+  _tonesMasterVolume() {
+    return this._config.channels.tones.connectToMaster
+      ? this._config.channels.master.volume
+      : 1.0;
+  }
+
+  _syncTonesMasterVolume() {
+    const volume = this._tonesMasterVolume();
+
+    if (this._outputAudio.tonesUsingDirect) {
+      this._setToneRouteGain(this._outputAudio.tonesDirectGain, volume);
+    }
+
+    const mediaDevices = this._libwebphone.getMediaDevices();
+    const element = mediaDevices
+      ? mediaDevices.getMediaElement("audiooutput")
+      : null;
+
+    if (element) {
+      element.volume = volume;
+    }
   }
 
   // ringerGain has already applied the ringer level, but the secondary path
@@ -2844,6 +3432,9 @@ export default class extends lwpRenderer {
         ? this._outputAudio.callWaitingGain.gain.value
         : null,
       masterVolume: this._config.channels.master.volume,
+      // On the "direct" route the beep bypasses the element entirely, so the
+      // element details below say nothing about whether it is audible.
+      route: this._outputAudio.tonesUsingDirect ? "direct" : "element",
     };
 
     if (!element) {
@@ -3058,7 +3649,15 @@ export default class extends lwpRenderer {
   _playCallWaitingBeep() {
     const generation = ++this._ringerAudio.waitingGeneration;
 
-    this._resumeAudioContext().then((running) => {
+    // Captured once, before the resume, and used for both: resuming one
+    // context and scheduling on another would let a promotion landing during
+    // the resume put the beep on a context that was never woken. The node
+    // held here stays connected either way - a promotion leaves the previous
+    // graph in place rather than tearing it down.
+    const gainNode = this._outputAudio.callWaitingGain;
+    const context = gainNode.context;
+
+    this._resumeContext(context).then((running) => {
       // The cycle was stopped, or another beep started, while we waited.
       if (this._ringerAudio.waitingGeneration !== generation) {
         this._callWaitingLog("beep.dropped", () => ({
@@ -3091,8 +3690,13 @@ export default class extends lwpRenderer {
         return;
       }
 
+      // The resume may have been what made the direct leg usable: a
+      // suspended context cannot be the direct route, so the cached decision
+      // can be one step behind here the same way it is in
+      // startAudioContext().
+      this._updateTonesRouting();
+
       const config = this._config.channels.ringer.callWaiting;
-      const context = this._audioContext;
       // Read after the resume settled, not before it - the clock has moved on.
       const now = context.currentTime;
       const fadeIn = config.fadeIn;
@@ -3116,7 +3720,7 @@ export default class extends lwpRenderer {
       envelope.gain.linearRampToValueAtTime(0, now + duration);
 
       oscillator.connect(envelope);
-      envelope.connect(this._outputAudio.callWaitingGain);
+      envelope.connect(gainNode);
 
       oscillator.onended = () => {
         oscillator.disconnect();
