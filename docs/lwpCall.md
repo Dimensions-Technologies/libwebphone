@@ -481,6 +481,18 @@ jssip as:
 > Answer the incoming session. This method is available for incoming sessions
 > only.
 
+Only a terminating (inbound) call can be answered. On an originating call this
+no-ops - it logs, emits `call.answer.ignored` and returns, without touching the
+session or the media pipeline. jssip would otherwise throw
+`NOT_SUPPORTED_ERROR`, which this class could not tell apart from a media
+failure and so treated as one, rejecting the call: on an outgoing session
+that is a CANCEL, so a stray answer (a headset going off-hook while the call
+rings, a host app answering whatever call happens to be primary) hung the call
+up mid-ring and reported it as `User Denied Media Access`. The built-in
+templates already gate on direction - lwpCallControl only renders its answer
+button for a terminating call, and lwpDialpad's `getAutoAction()` only returns
+`answer` for one - so this guard is for host apps driving the API directly.
+
 If there is an available instance of lwpMediaDevices the local media streams for
 the call will come from that class, otherwise the streams are created by jssip
 per call.
@@ -691,6 +703,7 @@ takes priority over the top-level config for that call only.
 | call.transfer.complete             | target (string or lwpCall)                                                                                                | Emitted once the transfer() call itself has finished running (i.e. the REFER was sent, or sending it failed) - not a statement about whether the transfer ultimately succeeds, see transfer.confirmed for that. Not emitted by attendedTransfer()                                                          |
 | call.transfer.confirmed            | target (string or lwpCall)                                                                                                | Emitted when the far end's NOTIFY confirms the referred-to call was answered; for transfer() this call then hangs up automatically, for attendedTransfer() both this call and targetCall hang up automatically, same as a desk phone releasing itself once a transfer connects                            |
 | call.answered                      |                                                                                                                            | Emitted when the call has been successfully answered                                                                                                                                                                                                                                                        |
+| call.answer.ignored                |                                                                                                                            | Emitted when answer() was called on an originating call and ignored - only a terminating (inbound) call can be answered. The call is left untouched; whatever asked for the answer is what needs fixing |
 | call.rejected                      |                                                                                                                            | Emitted when a terminating call has been successfully rejected (requires developers to use the lwpCall.reject() function)                                                                                                                                                                                   |
 | call.renegotiated                  |                                                                                                                            | Emitted when the call has been successully renegotiated                                                                                                                                                                                                                                                     |
 | call.send.dtmf                     | signal (string or integer)                                                                                                 | Emitted when the DTMF has been successfully sent, signal represents what was transmitted                                                                                                                                                                                                                    |

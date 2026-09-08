@@ -834,6 +834,35 @@ export default class {
 
   answer() {
     if (this.hasSession()) {
+      if (this.getDirection() == "originating") {
+        // JsSIP's answer() is for incoming sessions only - on an outgoing
+        // one it throws NOT_SUPPORTED_ERROR. Before this guard that throw
+        // landed in the catch below, where it was indistinguishable from a
+        // media failure and so got the same treatment: reject(), which on
+        // an outgoing session is a CANCEL. A stray answer - a headset going
+        // off-hook while an outgoing call is ringing, a host app answering
+        // whatever the primary call happens to be - therefore hung up a
+        // perfectly good call mid-ring, and reported it as "User Denied
+        // Media Access" (see _noUsableMedia below) when the microphone was
+        // never the problem.
+        //
+        // Returning before startStreams() also avoids the orphaned media it
+        // would otherwise leave behind: _createCallStream() clones the input
+        // tracks before it dedupes on requestId, and an outgoing call
+        // already holds an entry under this id, so the clone is never
+        // registered in _startedStreams and never stopped - a live
+        // microphone track leaked per stray answer().
+        //
+        // Emitted rather than silently swallowed. Nothing here is
+        // recoverable - the caller asked for something that cannot happen -
+        // but the bug is in whatever asked, and that is worth being able to
+        // see from the host app.
+        console.warn("[lwpCall] answer(): ignoring answer() on originating call " + this.getId() + "; only a terminating (inbound) call can be answered");
+        this._emit("answer.ignored", this);
+
+        return;
+      }
+
       const mediaDevices = this._libwebphone.getMediaDevices();
 
       if (mediaDevices) {
@@ -844,7 +873,7 @@ export default class {
           // the caller can give up while it sits open - JsSIP's answer()
           // throws InvalidStateError on a session that is no longer waiting
           // for one, and that throw lands inside this .then where only the
-          // catch below would ever see it.
+          // try/catch around the answer itself would ever see it.
           if (!this.isInProgress() || this.isEnded()) {
             this._emit("answer.abandoned", this);
 
@@ -877,7 +906,36 @@ export default class {
             return;
           }
 
-          this._getSession().answer({ mediaStream: streams });
+          // Caught separately from the media failures below. A throw from
+          // here is JsSIP refusing the answer itself - classically
+          // InvalidStateError, when the caller gave up while the mic prompt
+          // sat open - and the media pipeline did its job. Sharing the outer
+          // catch meant sharing its _noUsableMedia flag, which rewrites the
+          // cause on the "failed" event (see the session binding in
+          // _initEventBindings) into "User Denied Media Access" - a
+          // microphone diagnosis for something that was never about the
+          // microphone, and a misleading one to be handed while debugging.
+          //
+          // The rejection itself is kept: whatever the reason we could not
+          // answer, leaving the session un-answered until the INVITE times
+          // out means the caller hears ringback throughout with no idea
+          // anything went wrong.
+          try {
+            this._getSession().answer({ mediaStream: streams });
+          } catch (error) {
+            console.warn("[lwpCall] answer(): the session refused the answer for call " + this.getId() + " (not a media failure)", error);
+            this._emit("error", this, error);
+
+            // Guarded as below: the commonest way to get here is the caller
+            // having already given up, and terminating a session that has
+            // ended is not what "reject" means.
+            if (this.isInProgress() && !this.isEnded()) {
+              this.reject();
+            }
+
+            return;
+          }
+
           this._emit("answered", this);
         }).catch((error) => {
           // Nothing was watching this promise before. A user clicking
@@ -887,9 +945,13 @@ export default class {
           // ringback until the INVITE times out. The window is widest
           // exactly where auto-answer lives: startStreams() bottoms out in
           // getUserMedia(), so on the first call of a page this is a
-          // permission prompt of unbounded duration, and session.answer()
-          // itself throws InvalidStateError if the caller gave up while it
-          // was open.
+          // permission prompt of unbounded duration.
+          //
+          // Only media failures reach here now - startStreams() rejecting,
+          // or one of the checks above throwing. JsSIP refusing the answer
+          // is handled at the point it happens, above, so _noUsableMedia
+          // below is only ever set for a call that genuinely could not get
+          // media.
           console.warn("[lwpCall] answer() failed for call " + this.getId(), error);
           this._emit("error", this, error);
 
