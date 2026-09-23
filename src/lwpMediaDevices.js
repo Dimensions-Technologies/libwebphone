@@ -1939,7 +1939,10 @@ export default class extends lwpRenderer {
       this._sortAvailableDevices();
     }
 
-    if (options.updateConfig && preferedDevice.id != "none") {
+    if (
+      options.updateConfig &&
+      (preferedDevice.id != "none" || preferedDevice.deviceKind == "ringoutput2")
+    ) {
       const deviceKind = preferedDevice.deviceKind;
       const insertIndex = this._config[deviceKind].preferedDeviceIds.findIndex(
         (deviceId) => {
