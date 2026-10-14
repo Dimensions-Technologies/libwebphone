@@ -984,6 +984,55 @@ export default class {
     }
   }
 
+  /**
+   * Answers a still-ringing inbound call with "302 Moved Temporarily" and a
+   * Contact pointing at `target`, asking the PBX to route the call there
+   * instead (e.g. a direct-to-voicemail feature code). Unlike reject(), the
+   * intent is that the call moves elsewhere rather than ends - whether the
+   * PBX honours a device's 302, and what it does with the user's other
+   * ringing devices, is up to the PBX.
+   *
+   * `target` may be a full SIP URI or just a user part ("**1001"), which is
+   * completed against the registered domain the same way transfer()'s REFER
+   * target is (JsSIP UA.normalizeTarget). Returns whether the redirect was
+   * sent; no-ops (false) on an originating, answered or session-less call,
+   * since only a ringing inbound INVITE can be answered with a 3xx.
+   */
+  redirect(target) {
+    if (!this.hasSession() || !target) {
+      return false;
+    }
+
+    if (this.getDirection() != "terminating" || this.isEstablished() || this.isEnded()) {
+      console.warn("[lwpCall] redirect(): ignoring redirect() on call " + this.getId() + "; only a ringing inbound call can be redirected");
+      this._emit("redirect.ignored", this, target);
+      return false;
+    }
+
+    const userAgent = this._libwebphone.getUserAgent();
+    const agent = userAgent ? userAgent.getAgent() : null;
+    const uri = agent ? agent.normalizeTarget(target) : null;
+
+    if (!uri) {
+      console.warn("[lwpCall] redirect(): could not resolve target '" + target + "' for call " + this.getId());
+      this._emit("redirect.failed", this, target);
+      return false;
+    }
+
+    // JsSIP reports every local termination of a not-yet-answered session
+    // as "Rejected" - this flag lets the "failed" binding report the real
+    // cause instead, the same way _noUsableMedia does.
+    this._redirectedTo = uri.toString();
+    this._getSession().terminate({
+      status_code: 302,
+      reason_phrase: "Moved Temporarily",
+      extraHeaders: ["Contact: <" + this._redirectedTo + ">"],
+    });
+    this._emit("redirected", this, this._redirectedTo);
+
+    return true;
+  }
+
   renegotiate() {
     if (this.hasSession() && !this.isOnHold()) {
       this._getSession().renegotiate();
@@ -1180,6 +1229,10 @@ export default class {
     // only way the "failed" binding below can tell them apart and report the
     // real cause instead.
     this._noUsableMedia = false;
+
+    // The Contact URI this call was redirected to, if redirect() sent a 302 -
+    // read by the "failed" binding the same way as _noUsableMedia above.
+    this._redirectedTo = null;
 
     this._config = this._libwebphone._config.call;
 
@@ -1412,6 +1465,9 @@ export default class {
           // this termination into the specific reason a listener actually
           // needs, so it isn't indistinguishable from a real user decline.
           event[0] = { ...event[0], cause: "User Denied Media Access" };
+        } else if (this._redirectedTo && event[0]) {
+          // Same for redirect(): a 302 is not a decline.
+          event[0] = { ...event[0], cause: "Redirected" };
         }
         this._emit("failed", this, ...event);
       });
