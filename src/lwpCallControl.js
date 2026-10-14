@@ -205,6 +205,21 @@ export default class extends lwpRenderer {
     }
   }
 
+  /**
+   * Redirects the ringing primary call (302) to whatever's typed into
+   * lwpDialpad - the same target source transfer() uses - e.g. a
+   * direct-to-voicemail feature code plus an extension.
+   */
+  redirect() {
+    const currentCall = this._getCall();
+    const dialpad = this._libwebphone.getDialpad();
+    const target = dialpad ? dialpad.getTarget(true) : null;
+
+    if (currentCall && target) {
+      currentCall.redirect(target);
+    }
+  }
+
   updateRenders(call = null) {
     let callSummary = null;
     const callList = this._libwebphone.getCallList();
@@ -231,6 +246,7 @@ export default class extends lwpRenderer {
     const defaults = {
       en: {
         answer: "Anwser",
+        redirect: "Redirect to Dialed",
         redial: "Redial",
         cancel: "Cancel",
         hangup: "Hang Up",
@@ -379,6 +395,7 @@ export default class extends lwpRenderer {
       template: this._renderDefaultTemplate(),
       i18n: {
         answer: "libwebphone:callControl.answer",
+        redirect: "libwebphone:callControl.redirect",
         redial: "libwebphone:callControl.redial",
         cancel: "libwebphone:callControl.cancel",
         hangup: "libwebphone:callControl.hangup",
@@ -578,6 +595,15 @@ export default class extends lwpRenderer {
             },
           },
         },
+        redirect: {
+          events: {
+            onclick: (event) => {
+              const element = event.srcElement;
+              element.disabled = true;
+              this.redirect();
+            },
+          },
+        },
       },
     };
   }
@@ -728,6 +754,10 @@ export default class extends lwpRenderer {
         {{#data.call.progress}}
           <button id="{{by_id.answer.elementId}}">
             {{i18n.answer}}
+          </button>
+
+          <button id="{{by_id.redirect.elementId}}">
+            {{i18n.redirect}}
           </button>
         {{/data.call.progress}}
         {{/data.call.terminating}}
