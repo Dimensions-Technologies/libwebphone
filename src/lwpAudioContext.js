@@ -573,8 +573,60 @@ export default class extends lwpRenderer {
    * here is the pre-existing behaviour of answering without one.
    */
   playAutoAnswerWarning() {
-    const config = this._config.channels.ringer.autoAnswerWarning;
+    return this._playBeepSequence(
+      this._outputAudio.autoAnswerWarningGain,
+      this._config.channels.ringer.autoAnswerWarning,
+      "autoanswer.warning"
+    );
+  }
 
+  isEndCallToneEnabled() {
+    return !!this._config.channels.ringer.endCallTone.enabled;
+  }
+
+  // Takes effect from the next call to clear.
+  setEndCallToneEnabled(enabled) {
+    enabled = !!enabled;
+
+    if (enabled == this.isEndCallToneEnabled()) {
+      return;
+    }
+
+    this._config.channels.ringer.endCallTone.enabled = enabled;
+
+    this._emit("channel.ringer.endcalltone.enabled", this, enabled);
+    this.updateRenders();
+  }
+
+  toggleEndCallTone() {
+    this.setEndCallToneEnabled(!this.isEndCallToneEnabled());
+  }
+
+  /**
+   * Plays the end call tone - a soft "beep beep" on the speaker telling the
+   * user the call has cleared, whichever side hung up. Played automatically
+   * when an established call ends (see _initEventBindings()); exposed so a
+   * host app can sound it for anything else it treats as a call clearing.
+   *
+   * Resolves true once the tone has finished, or false straight away when
+   * it is disabled or could not be played - never rejects.
+   */
+  playEndCallTone() {
+    return this._playBeepSequence(
+      this._outputAudio.endCallToneGain,
+      this._config.channels.ringer.endCallTone,
+      "endcall.tone"
+    );
+  }
+
+  // The short fixed beep sequences - the auto-answer warning and the end
+  // call tone. `config` is one of the channels.ringer tone blocks (enabled,
+  // count, gap, duration, fades, frequency, type), and `eventPrefix` names
+  // its `.started` / `.stopped` / `.error` events.
+  //
+  // Resolves rather than rejects on every failure path: nothing waiting on
+  // one of these should ever fail because a beep couldn't be played.
+  _playBeepSequence(gainNode, config, eventPrefix) {
     if (!config.enabled || config.count < 1) {
       return Promise.resolve(false);
     }
@@ -584,14 +636,13 @@ export default class extends lwpRenderer {
     // As with the call waiting beep: captured once, so the context resumed
     // is the context the beeps are scheduled on even if a promotion lands
     // while the resume is settling.
-    const gainNode = this._outputAudio.autoAnswerWarningGain;
     const context = gainNode.context;
 
     return this._resumeContext(context)
       .then((running) => {
         if (!running) {
           this._emit(
-            "autoanswer.warning.error",
+            eventPrefix + ".error",
             this,
             new Error("AudioContext is not running"),
             this._getMediaElementSinkId("audiooutput")
@@ -620,12 +671,7 @@ export default class extends lwpRenderer {
           // than driven by a timer per beep: setTimeout jitter between
           // them would be plainly audible at this spacing, and the whole
           // sequence is only a few hundred milliseconds long.
-          this._scheduleAutoAnswerWarningBeep(
-            gainNode,
-            config,
-            start + index * step,
-            duration
-          );
+          this._scheduleBeep(gainNode, config, start + index * step, duration);
         }
 
         // The tail of the last beep, plus the same small margin its own
@@ -633,17 +679,17 @@ export default class extends lwpRenderer {
         // clipping the final ramp.
         const total = (config.count - 1) * step + duration + 0.005;
 
-        this._emit("autoanswer.warning.started", this, total);
+        this._emit(eventPrefix + ".started", this, total);
 
         return new Promise((resolve) => {
           setTimeout(() => {
-            this._emit("autoanswer.warning.stopped", this);
+            this._emit(eventPrefix + ".stopped", this);
             resolve(true);
           }, total * 1000);
         });
       })
       .catch((error) => {
-        this._emit("autoanswer.warning.error", this, error, null);
+        this._emit(eventPrefix + ".error", this, error, null);
 
         return false;
       });
@@ -651,7 +697,7 @@ export default class extends lwpRenderer {
 
   // Takes the node to play into rather than a context, so the oscillator can
   // only ever be created on the context that node belongs to.
-  _scheduleAutoAnswerWarningBeep(gainNode, config, when, duration) {
+  _scheduleBeep(gainNode, config, when, duration) {
     const context = gainNode.context;
     const oscillator = this._shimCreateOscillator(context);
     const envelope = this._shimCreateGain(context);
@@ -659,7 +705,7 @@ export default class extends lwpRenderer {
     oscillator.type = config.type;
     oscillator.frequency.value = config.frequency;
 
-    // Shape only - the level is `autoAnswerWarningGain`, the way every other
+    // Shape only - the level is the node passed in, the way every other
     // channel keeps its volume on a node of its own rather than baked into
     // the envelope.
     envelope.gain.setValueAtTime(0, when);
@@ -1225,6 +1271,8 @@ export default class extends lwpRenderer {
         callwaitinginterval: "Call Waiting Tone Interval (seconds)",
         autoanswerwarningsection: "Auto Answer",
         autoanswerwarning: "Auto Answer Warning Tone",
+        endcalltonesection: "End Call",
+        endcalltone: "End Call Tone",
         alertinfointernal: "Internal Call Ringtone",
         alertinfoexternal: "External Call Ringtone",
         alertinfocustom: "Custom Alert-Info Ringtones",
@@ -1371,6 +1419,28 @@ export default class extends lwpRenderer {
             // stopping mid-waveform clicks at both ends.
             fadeIn: 0.005,
             fadeOut: 0.01,
+          },
+          // The end call tone: a soft "beep beep" when an established call
+          // clears, whichever side hung up, so the user hears that they
+          // have been disconnected rather than having to look. Played out
+          // of the speaker (`audiooutput`) like the two tones above - it is
+          // for the person who was on the call - see playEndCallTone().
+          endCallTone: {
+            // With this off a call clears silently.
+            enabled: true,
+            show: true,
+            count: 2,
+            gap: 0.12,
+            // The call waiting beep's pitch and level: a gentle cue, not
+            // an alarm. A harsh end-of-call tone is what got the original
+            // one removed, so this stays a sine well below full scale.
+            volume: 0.25,
+            frequency: 440,
+            duration: 0.15,
+            type: "sine",
+            // Declicks, as everywhere else here.
+            fadeIn: 0.01,
+            fadeOut: 0.02,
           },
           // How long previewRingtone() plays before auto-stopping itself
           previewDuration: 8,
@@ -1616,6 +1686,7 @@ export default class extends lwpRenderer {
       this._outputAudio.tonesGain,
       this._outputAudio.callWaitingGain,
       this._outputAudio.autoAnswerWarningGain,
+      this._outputAudio.endCallToneGain,
       this._outputAudio.tonesBus,
       this._outputAudio.tonesDirectGain,
       this._outputAudio.tonesElementGain,
@@ -1732,6 +1803,12 @@ export default class extends lwpRenderer {
     this._outputAudio.autoAnswerWarningGain.gain.value =
       this._config.channels.ringer.autoAnswerWarning.volume;
     this._outputAudio.autoAnswerWarningGain.connect(this._outputAudio.tonesBus);
+
+    // The end call tone, likewise on the tones bus with a level of its own.
+    this._outputAudio.endCallToneGain = this._shimCreateGain(context);
+    this._outputAudio.endCallToneGain.gain.value =
+      this._config.channels.ringer.endCallTone.volume;
+    this._outputAudio.endCallToneGain.connect(this._outputAudio.tonesBus);
   }
 
   _initRingAudio() {
@@ -1921,6 +1998,13 @@ export default class extends lwpRenderer {
         });
       }
     );
+
+    // "ended" only fires for a call that was established - one that never
+    // connected (rejected, missed, cancelled) "failed"s instead, and gets
+    // no tone: it never had a conversation to clear.
+    this._libwebphone.on("call.ended", () => {
+      this.playEndCallTone();
+    });
 
     this._libwebphone.on(
       "call.primary.remote.audio.added",
@@ -2118,6 +2202,8 @@ export default class extends lwpRenderer {
         callwaitinginterval: "libwebphone:audioContext.callwaitinginterval",
         autoanswerwarningsection: "libwebphone:audioContext.autoanswerwarningsection",
         autoanswerwarning: "libwebphone:audioContext.autoanswerwarning",
+        endcalltonesection: "libwebphone:audioContext.endcalltonesection",
+        endcalltone: "libwebphone:audioContext.endcalltone",
         alertinfointernal: "libwebphone:audioContext.alertinfointernal",
         alertinfoexternal: "libwebphone:audioContext.alertinfoexternal",
         alertinfocustom: "libwebphone:audioContext.alertinfocustom",
@@ -2180,6 +2266,13 @@ export default class extends lwpRenderer {
           events: {
             onchange: (event) => {
               this.setAutoAnswerWarningEnabled(event.srcElement.checked);
+            },
+          },
+        },
+        endcalltone: {
+          events: {
+            onchange: (event) => {
+              this.setEndCallToneEnabled(event.srcElement.checked);
             },
           },
         },
@@ -2374,6 +2467,8 @@ export default class extends lwpRenderer {
           ${this._renderCallWaitingSection()}
 
           ${this._renderAutoAnswerWarningSection()}
+
+          ${this._renderEndCallToneSection()}
         </div>
         `;
   }
@@ -2401,6 +2496,11 @@ export default class extends lwpRenderer {
       autoanswerwarning: `
         <div>
           ${this._renderAutoAnswerWarningSection()}
+        </div>
+        `,
+      endcalltone: `
+        <div>
+          ${this._renderEndCallToneSection()}
         </div>
         `,
     };
@@ -2612,6 +2712,23 @@ export default class extends lwpRenderer {
     `;
   }
 
+  _renderEndCallToneSection() {
+    return `
+          {{#data.channels.ringer.endCallTone.show}}
+            <fieldset>
+              <legend>{{i18n.endcalltonesection}}</legend>
+
+              <div>
+                <input type="checkbox" id="{{by_id.endcalltone.elementId}}" {{#data.endCallTone.enabled}}checked{{/data.endCallTone.enabled}}>
+                <label for="{{by_id.endcalltone.elementId}}">
+                  {{i18n.endcalltone}}
+                </label>
+              </div>
+            </fieldset>
+          {{/data.channels.ringer.endCallTone.show}}
+    `;
+  }
+
   _renderCallWaitingSection() {
     return `
           {{#data.channels.ringer.callWaiting.show}}
@@ -2680,6 +2797,10 @@ export default class extends lwpRenderer {
     // show up in it.
     data.autoAnswerWarning = {
       enabled: this.isAutoAnswerWarningEnabled(),
+    };
+
+    data.endCallTone = {
+      enabled: this.isEndCallToneEnabled(),
     };
 
     return data;

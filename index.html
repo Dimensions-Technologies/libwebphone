@@ -633,14 +633,16 @@
            Alert-Info fieldset nested inside intact. */
         #audio_context_ringtones > div > fieldset,
         #audio_context_callwaiting > div > fieldset,
-        #audio_context_autoanswer > div > fieldset {
+        #audio_context_autoanswer > div > fieldset,
+        #audio_context_endcalltone > div > fieldset {
             border: none;
             padding: 0;
         }
 
         #audio_context_ringtones > div > fieldset > legend,
         #audio_context_callwaiting > div > fieldset > legend,
-        #audio_context_autoanswer > div > fieldset > legend {
+        #audio_context_autoanswer > div > fieldset > legend,
+        #audio_context_endcalltone > div > fieldset > legend {
             display: none;
         }
 
@@ -1601,6 +1603,15 @@
             <div class="panel-columns panel-columns--single">
                 <div class="panel-column">
                     <div id="audio_context_callwaiting"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">End Call</div>
+            <div class="panel-columns panel-columns--single">
+                <div class="panel-column">
+                    <div id="audio_context_endcalltone"></div>
                 </div>
             </div>
         </div>

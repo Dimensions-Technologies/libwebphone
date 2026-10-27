@@ -91,6 +91,9 @@
                 },
                 "autoAnswerWarning": {
                     "enabled": true
+                },
+                "endCallTone": {
+                    "enabled": true
                 }
             }
         },
@@ -137,6 +140,12 @@
                     "elementId": "audio_context_autoanswer"
                 },
                 "section": "autoanswerwarning"
+            },
+            {
+                "root": {
+                    "elementId": "audio_context_endcalltone"
+                },
+                "section": "endcalltone"
             }
         ]
     },
