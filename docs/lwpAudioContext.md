@@ -82,6 +82,16 @@ The trace answers the two questions a silent call waiting tone raises, in order:
 
 > As with the ringtone selection and the Alert-Info mappings, **the library does not persist the toggle or the interval.** A host application that lets users change them is responsible for storing them and passing them back in via `channels.ringer.callWaiting` when it constructs libwebphone.
 
+### End call tone
+
+When an established call clears - whichever side hung up - a short, soft "beep beep" is played so the user hears that they have been disconnected rather than having to look. It is the call waiting beep's pitch and level (440Hz sine at 0.25), twice: a gentle cue rather than the harsh tone an earlier version played.
+
+It plays on `call.ended`, which only fires for a call that was established. A call that never connected - rejected, missed, cancelled, busy - fails instead, and makes no sound: there was no conversation to clear.
+
+Like the call waiting beep it goes to the **speaker** (`audiooutput`) device, not the ring output - it is for the person who was on the call - and has its own gain node on the tones bus, so neither the DTMF feedback volume nor the ringer volume scales it. `channels.ringer.endCallTone.volume` sets its level.
+
+`channels.ringer.endCallTone.enabled` turns it off (on by default), and [setEndCallToneEnabled()](#setendcalltoneenabledenabled) does the same at runtime. As with the other tone settings, the library does not persist the toggle - pass it back in via `channels.ringer.endCallTone` when constructing libwebphone.
+
 There is no `<audio>` element fallback: ringing requires the AudioContext to be running. Since browsers keep it suspended until the user interacts with the page, this class registers a one-shot `click`/`touchend`/`keydown` listener on `document` and resumes the context on the first interaction anywhere in the app - see [startAudioContext()](#startaudiocontext). If a ring is nonetheless attempted before that happens, `audioContext.ringtone.play.error` is emitted rather than failing silently.
 
 Ringtone audio reaches the selected ring output device the same way call and preview audio does, so it follows the ring output device selection automatically. There are two routes to that device and the class picks one at construction - see [Output device routing](#output-device-routing) below.
@@ -516,6 +526,40 @@ Resolves rather than rejects on every failure path - when the tone is disabled, 
 
 Every beep is scheduled up front on the audio clock rather than driven by a timer per beep - `setTimeout` jitter between them would be plainly audible at this spacing.
 
+#### isEndCallToneEnabled()
+
+Return:
+
+| Type    | Description                                                  |
+| ------- | ------------------------------------------------------------ |
+| boolean | The current value of `channels.ringer.endCallTone.enabled`   |
+
+#### setEndCallToneEnabled(enabled)
+
+Turns the [end call tone](#end-call-tone) on or off.
+
+| Name    | Type    | Default | Description                                       |
+| ------- | ------- | ------- | ------------------------------------------------- |
+| enabled | boolean |         | Whether the tone sounds when an established call clears |
+
+Takes effect from the next call to clear. Emits `audioContext.channel.ringer.endcalltone.enabled` and re-renders. Setting it to what it already is does nothing.
+
+#### toggleEndCallTone()
+
+Inverts [isEndCallToneEnabled()](#isendcalltoneenabled) via [setEndCallToneEnabled()](#setendcalltoneenabledenabled).
+
+#### playEndCallTone()
+
+Plays the [end call tone](#end-call-tone). Called automatically on `call.ended`; exposed so a host application can sound it for anything else it treats as a call clearing.
+
+Return:
+
+| Type              | Description                                                        |
+| ----------------- | ------------------------------------------------------------------ |
+| Promise\<boolean\> | Resolves once the tone has finished, to whether it actually played |
+
+Resolves to false immediately when the tone is disabled. Never rejects - a failure to play is reported on `audioContext.endcall.tone.error`.
+
 #### getCallWaitingInterval()
 
 Return:
@@ -896,6 +940,8 @@ Re-paint / update all render targets.
 | callwaitingsection | Call Waiting | Used to label the section holding the call waiting tone controls |
 | callwaiting   | Call Waiting Tone | Used to label the checkbox that enables/disables the call waiting tone |
 | callwaitinginterval | Call Waiting Tone Interval (seconds) | Used to label the input that sets the seconds between call waiting beeps |
+| endcalltonesection | End Call | Used to label the section holding the end call tone checkbox |
+| endcalltone   | End Call Tone  | Used to label the checkbox that enables/disables the end call tone |
 | alertinfointernal | Internal Call Ringtone | Used to label the ringtone selector for the `alert-internal` Alert-Info value |
 | alertinfoexternal | External Call Ringtone | Used to label the ringtone selector for the `alert-external` Alert-Info value |
 | alertinfocustom | Custom Alert-Info Ringtones | Used to label the section holding any further Alert-Info mappings |
@@ -943,6 +989,16 @@ Re-paint / update all render targets.
 | channels.ringer.autoAnswerWarning.type | string  | "sine" | Oscillator type                                                                                                                                      |
 | channels.ringer.autoAnswerWarning.fadeIn | float  | 0.005  | Declick ramp up, in seconds                                                                                                                          |
 | channels.ringer.autoAnswerWarning.fadeOut | float | 0.01   | Declick ramp down, in seconds                                                                                                                        |
+| channels.ringer.endCallTone.show    | boolean  | true    | Should the default template show the [end call section](#sections) - the end call tone checkbox |
+| channels.ringer.endCallTone.enabled | boolean  | true    | Whether an established call clearing sounds the [end call tone](#end-call-tone). Change at runtime with [setEndCallToneEnabled()](#setendcalltoneenabledenabled) |
+| channels.ringer.endCallTone.count   | integer  | 2       | How many beeps |
+| channels.ringer.endCallTone.gap     | float    | 0.12    | Seconds of silence between beeps |
+| channels.ringer.endCallTone.duration | float   | 0.15    | Seconds each beep sounds for, inclusive of its fades |
+| channels.ringer.endCallTone.frequency | integer | 440    | Beep frequency in Hz - the call waiting beep's pitch |
+| channels.ringer.endCallTone.volume  | float    | 0.25    | The level of the beep on the speaker (`audiooutput`) device, on its own gain node |
+| channels.ringer.endCallTone.type    | string   | "sine"  | Oscillator type |
+| channels.ringer.endCallTone.fadeIn  | float    | 0.01    | Declick ramp up, in seconds |
+| channels.ringer.endCallTone.fadeOut | float    | 0.02    | Declick ramp down, in seconds |
 | channels.ringer.callWaiting.volume  | float    | 0.4    | The level of the beep on the speaker (`audiooutput`) device. Master volume still applies on top; the ringer volume does not, since the beep does not go to the ring output. Well below full scale because it plays into a headset someone is already holding a conversation on - for reference the DTMF feedback tones on the same device sit at 0.15, and those are not competing with anything |
 | channels.ringer.callWaiting.frequency | integer | 440    | The frequency of the beep                                                                                                                            |
 | channels.ringer.callWaiting.duration | float   | 0.25    | The duration, in seconds, of one beep. Raised to `fadeIn + fadeOut` if set shorter than the two fades together                                        |
@@ -1002,6 +1058,10 @@ Re-paint / update all render targets.
 | audioContext.autoanswer.warning.started | duration (float)             | Emitted as the warning tone begins, carrying how long it will run in seconds - the auto-answered call is answered when it finishes |
 | audioContext.autoanswer.warning.stopped |                              | Emitted once the warning tone has finished                                                                                        |
 | audioContext.autoanswer.warning.error | error (Error), sinkId (string) | Emitted when the warning tone could not be played. The call is answered anyway, without one                                       |
+| audioContext.channel.ringer.endcalltone.enabled | enabled (boolean) | Emitted when setEndCallToneEnabled() turns the end call tone on or off. Not emitted where nothing actually changed |
+| audioContext.endcall.tone.started     | duration (float)                 | Emitted as the end call tone begins, carrying how long it will run in seconds |
+| audioContext.endcall.tone.stopped     |                                  | Emitted once the end call tone has finished |
+| audioContext.endcall.tone.error       | error (Error), sinkId (string)   | Emitted when the end call tone could not be played |
 | audioContext.channel.ringer.alertinfo.changed | key (string), id (string or null) | Emitted when setAlertInfoRingtone() adds a mapping or changes one, including when it is cleared back to the selected ringtone (a null id). Not emitted where nothing actually changed |
 | audioContext.channel.ringer.alertinfo.removed | key (string)                | Emitted when removeAlertInfoMapping() deletes a custom mapping         |
 | audioContext.channel.ringer.alertinfo.error | error                        | Emitted when resolving an inbound call's Alert-Info threw - in practice a `channels.ringer.alertInfo.matcher` that failed. The call still rings, with `channels.ringer.selected`; this is how an otherwise invisible fault in a host's own matching surfaces |
@@ -1027,6 +1087,7 @@ Re-paint / update all render targets.
 | call.ringing.stopped                    | Invokes stopRinging() **and** stopCallWaiting() with the call's id - whichever of the two the call ended up on, the other ignores it |
 | call.established                        | Re-decides ringing vs. call waiting for any call still ringing: a call answered elsewhere means one that is still ringing should drop to the beep |
 | call.terminated, call.ended, call.failed | The same re-decision the other way: the established call a waiting call was waiting behind has gone, so that call takes the ringer over and rings properly |
+| call.ended                              | Also invokes playEndCallTone() - see [End call tone](#end-call-tone) |
 | call.primary.remote.audio.added         | Updates the remote source stream                                          |
 | call.primary.remote.mediaStream.connect | Updates the remote source stream                                          |
 | dialpad.tones.play                      | Invokes playTones                                                         |
@@ -1068,6 +1129,7 @@ names it, instead of switching the other two off with `show` flags:
 | `ringtones`   | The ringtone selector, its preview button and the Alert-Info controls - `channels.ringer.ringtones.show` |
 | `callwaiting` | The call waiting tone checkbox and, while it is on, the interval input - `channels.ringer.callWaiting.show` |
 | `autoanswerwarning` | The auto-answer warning tone checkbox - `channels.ringer.autoAnswerWarning.show`. Only the tone: whether calls auto-answer at all, and whether they open the microphone, are `config.call` settings and belong to [libwebphone](./../README.md) rather than this module |
+| `endcalltone` | The end call tone checkbox - `channels.ringer.endCallTone.show` |
 
 A section target needs nothing else: the events, i18n keys and data all come
 from the default render config, exactly as for a target that takes the whole
