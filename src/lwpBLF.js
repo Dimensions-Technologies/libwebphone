@@ -207,6 +207,9 @@ export default class extends lwpRenderer {
         });
 
         subscriber.on("notify", (is_final, request, body, content_type) => {
+            // The first NOTIFY after (re)subscribing is the first real state for the key - its status until then is
+            // only the "idle" default or left over from the old subscription - so it's reported even if unchanged.
+            const isFirstNotify = !key.lastNotify;
             key.lastNotify = new Date();
             key.resubscribeAttempts = 0; // any NOTIFY proves the subscription is alive; forgive past failures
 
@@ -218,9 +221,9 @@ export default class extends lwpRenderer {
             if (content_type && content_type.indexOf(key.acceptType) !== -1 && body) {
                 console.log(`BLF [${key.id}]: Parsing as ${key.eventType}`);
                 if (key.eventType === "dialog") {
-                    this._parseDialogInfo(key, body);
+                    this._parseDialogInfo(key, body, isFirstNotify);
                 } else if (key.eventType === "presence") {
-                    this._parsePresenceInfo(key, body);
+                    this._parsePresenceInfo(key, body, isFirstNotify);
                 }
             } else {
                 console.warn(`BLF [${key.id}]: Content-Type mismatch or empty body. Expected: ${key.acceptType}, Got: ${content_type}`);
@@ -329,7 +332,7 @@ export default class extends lwpRenderer {
         }
     }
 
-    _parseDialogInfo(key, body) {
+    _parseDialogInfo(key, body, forceEmit = false) {
         // Helper: namespace-safe element lookup (handles default xmlns on dialog-info documents)
         const getEls = (node, localName) => node.getElementsByTagNameNS("*", localName);
         const getEl = (node, localName) => getEls(node, localName)[0] || null;
@@ -340,7 +343,7 @@ export default class extends lwpRenderer {
 
             const dialogInfoEl = getEl(xmlDoc, "dialog-info");
             if (!dialogInfoEl) {
-                this._updateKeyInfo(key, "unknown", null);
+                this._updateKeyInfo(key, "unknown", null, forceEmit);
                 return;
             }
 
@@ -355,7 +358,7 @@ export default class extends lwpRenderer {
 
             if (!dialogs.length) {
                 // No dialogs in a "full" document means the extension is idle
-                this._updateKeyInfo(key, "idle", null);
+                this._updateKeyInfo(key, "idle", null, forceEmit);
                 return;
             }
 
@@ -412,14 +415,14 @@ export default class extends lwpRenderer {
                 }
             }
 
-            this._updateKeyInfo(key, bestStatus, bestCallInfo);
+            this._updateKeyInfo(key, bestStatus, bestCallInfo, forceEmit);
         } catch (e) {
             console.error(`BLF [${key.id}]: Error parsing dialog-info`, e);
-            this._updateKeyInfo(key, "unknown", null);
+            this._updateKeyInfo(key, "unknown", null, forceEmit);
         }
     }
 
-    _parsePresenceInfo(key, body) {
+    _parsePresenceInfo(key, body, forceEmit = false) {
         try {
             const parser = new DOMParser();
             const xmlDoc = parser.parseFromString(body, "application/xml");
@@ -427,19 +430,20 @@ export default class extends lwpRenderer {
             const status = basicEl ? basicEl.textContent.toLowerCase() : "unknown";
 
             if (status === "open") {
-                this._updateKeyStatus(key, "idle");
+                this._updateKeyStatus(key, "idle", forceEmit);
             } else if (status === "closed") {
-                this._updateKeyStatus(key, "incall");
+                this._updateKeyStatus(key, "incall", forceEmit);
             } else {
-                this._updateKeyStatus(key, "unknown");
+                this._updateKeyStatus(key, "unknown", forceEmit);
             }
         } catch (e) {
-            this._updateKeyStatus(key, "unknown");
+            this._updateKeyStatus(key, "unknown", forceEmit);
         }
     }
 
-    _updateKeyInfo(key, status, callInfo) {
-        const statusChanged = key.status !== status;
+    /** forceEmit reports the status even when it hasn't changed (the first NOTIFY after subscribing). */
+    _updateKeyInfo(key, status, callInfo, forceEmit = false) {
+        const statusChanged = key.status !== status || forceEmit;
         const callInfoChanged =
             JSON.stringify(key.callInfo) !== JSON.stringify(callInfo);
 
@@ -463,8 +467,9 @@ export default class extends lwpRenderer {
         this.updateRenders();
     }
 
-    _updateKeyStatus(key, status) {
-        if (key.status === status) {
+    /** forceEmit reports the status even when it hasn't changed (the first NOTIFY after subscribing). */
+    _updateKeyStatus(key, status, forceEmit = false) {
+        if (key.status === status && !forceEmit) {
             return;
         }
 
